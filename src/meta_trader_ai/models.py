@@ -191,7 +191,7 @@ class BacktestTrade(BaseModel):
     stop: float
     target: float
     exit: float
-    outcome: Literal["TP", "SL", "DAY_CLOSE"]
+    outcome: Literal["TP", "SL", "DAY_CLOSE", "RANGE_CLOSE"]
     r_multiple: float
     pnl_money: float
     buy_score: float
@@ -229,4 +229,42 @@ class BacktestSummary(BaseModel):
         "Signals are evaluated on completed M15 bars; entries use the next bar open. "
         "Concurrent positions are capped by max_open_trades. Any still-open trade is "
         "marked to market at the selected day's final bar close."
+    )
+
+
+class RangeBacktestSummary(BaseModel):
+    start_date: str
+    end_date: str
+    symbol: str
+    timeframe: str
+    trading_days: int
+    bars_available: int
+    evaluated_bars: int
+    signals: int
+    buy_signals: int
+    sell_signals: int
+    trades: int
+    buy_trades: int
+    sell_trades: int
+    wins: int
+    losses: int
+    flat: int
+    win_rate: float
+    expectancy_r: float
+    net_r: float
+    profit_factor: float | None = None
+    max_drawdown_r: float
+    max_drawdown_percent: float
+    estimated_pnl_money: float
+    total_return_percent: float
+    starting_balance: float
+    ending_balance: float
+    risk_percent: float
+    reward_risk_ratio: float
+    max_open_trades: int = Field(1, ge=1, le=5)
+    trades_detail: list[BacktestTrade] = Field(default_factory=list)
+    note: str = (
+        "Continuous range replay: positions may remain open across broker-day boundaries. "
+        "Signals are evaluated on completed bars and enter on the next bar open. "
+        "Only positions still open at the final bar are marked to market as RANGE_CLOSE."
     )
