@@ -133,6 +133,7 @@ class DecisionResponse(BaseModel):
     passed_count: int
     min_pass_count: int
     blockers: list[str]
+    primary_blocker: str | None = None
     factors: list[FactorScore]
     safety: list[SafetyGate]
     performance: PerformanceSummary
