@@ -1,33 +1,35 @@
 {
-  "status": "PARITY_DEBUG",
+  "status": "COMPLETED",
   "provider": "LONA Trading Assistant",
-  "strategy_name": "MTAI Six-Factor Stable Baseline v1.0.1",
-  "strategy_id": "d24345c5-4c20-4251-a24f-7f681d0078c9",
-  "report_id": "1c53f289-061a-4e75-8a69-c34161a7f895",
+  "strategy_name": "MTAI Six-Factor Stable Baseline v1.0.2",
+  "strategy_id": "0ba2bc04-a486-409f-9f8a-c3fa7be85223",
+  "report_id": "1685a092-b3fd-452f-a638-57abe2d0a725",
   "symbol": "XAUUSD_o",
   "symbol_id": "5971a9c3-0671-4acb-b785-19e849c4901b",
   "frequency": "15m",
   "requested_start": "2022-06-13",
   "requested_end": "2026-09-04",
-  "message": "LONA data and order execution are healthy: a fixed-size sanity strategy made 459 trades and an ATR bracket sanity strategy made 169 trades on the same uploaded MT5 data. The six-factor permissive diagnostic also made 161 trades after fixing a Backtrader position-count bug. The remaining zero-trade stable-baseline result is a strategy-parity issue. Isolation tests identify the LONA Static/OrderBlock implementation at threshold 50 as the current blocker: with Static=0 and Dynamic=60 the strategy made 11 trades, while keeping Static=50 produced 0. Do not use the zero-trade LONA baseline as a performance verdict until factor parity is fixed.",
+  "message": "Independent LONA validation now executes correctly on the same 100,000-bar LiteFinance MT5 dataset. We fixed a Backtrader flat-position counting bug and restored the missing Static/OrderBlock impulse proxy. Full-history result: +30.21% total return, 2,347 trades, 34.55% win rate, profit factor 1.04, expectancy +0.13 per trade and 21.27% maximum drawdown. This is encouraging cross-engine evidence, but LONA is still an approximation of the Python engine and the drawdown is too high to treat this as production-ready evidence. DEMO forward validation remains required.",
   "diagnostics": {
     "execution_sanity_trades": 459,
-    "execution_sanity_return_percent": 0.35,
     "bracket_sanity_trades": 169,
-    "bracket_sanity_return_percent": 0.23,
     "permissive_six_factor_trades": 161,
-    "permissive_six_factor_return_percent": 11.28,
-    "static_relaxed_trades": 11,
-    "static_relaxed_return_percent": -1.02,
-    "identified_blocker": "Static/OrderBlock parity at threshold 50"
+    "static_orderblock_parity_fixed": true,
+    "recent_period_start": "2026-08-01",
+    "recent_period_end": "2026-09-04",
+    "recent_period_trades": 39,
+    "recent_period_return_percent": 2.63,
+    "recent_period_max_drawdown_percent": 3.67
   },
   "metrics": {
-    "total_return": 0.0,
-    "sharpe_ratio": 0.0,
-    "max_drawdown": 0.0,
-    "win_rate": 0.0,
-    "trades": 0,
-    "final_portfolio_value": 1000.0,
-    "expectancy": 0.0
+    "total_return": 30.21,
+    "sharpe_ratio": 0.45,
+    "max_drawdown": 21.27,
+    "win_rate": 34.55,
+    "trades": 2347,
+    "final_portfolio_value": 1302.13,
+    "expectancy": 0.13,
+    "profit_factor": 1.04,
+    "cagr": 6.44
   }
 }
