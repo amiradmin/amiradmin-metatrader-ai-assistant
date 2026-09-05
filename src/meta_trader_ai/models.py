@@ -29,9 +29,6 @@ class FactorConfig(BaseModel):
 
 
 class DecisionRuleConfig(BaseModel):
-    # Bootstrap gates are deliberately moderate so the model can collect enough
-    # DEMO/forward evidence to learn. Profitability still has to be proven by
-    # forward expectancy; these values are not a profit target or guarantee.
     min_pass_count: int = Field(3, ge=1, le=6)
     min_total_score: float = Field(50.0, ge=0, le=100)
     min_side_edge: float = Field(9.0, ge=0, le=100)
@@ -42,13 +39,12 @@ class SafetyConfig(BaseModel):
     block_high_news: bool = True
     block_unknown_news: bool = False
     demo_only: bool = True
+    # Bridge-side execution ceiling. The EA also has a local MaxOpenTrades hard
+    # ceiling, so the effective live limit is min(local ceiling, this value).
+    max_open_trades: int = Field(1, ge=1, le=5)
 
 
 class StrategyConfig(BaseModel):
-    # Thresholds are aligned with the score ranges emitted by analyzers.py.
-    # In particular, static/order-block normally tops out near 60 without an
-    # impulse proxy, so the old required threshold of 65 starved the system of
-    # signals and prevented forward learning.
     dynamic_levels: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=True)
     static_levels: FactorConfig = FactorConfig(min_score=50, weight=1.2, required=True)
     fibonacci: FactorConfig = FactorConfig(min_score=45, weight=0.8, required=False)
@@ -139,6 +135,7 @@ class DecisionResponse(BaseModel):
     side_edge: float
     passed_count: int
     min_pass_count: int
+    max_open_trades: int = Field(1, ge=1, le=5)
     blockers: list[str]
     primary_blocker: str | None = None
     factors: list[FactorScore]
@@ -226,5 +223,10 @@ class BacktestSummary(BaseModel):
     ending_balance: float
     risk_percent: float
     reward_risk_ratio: float
+    max_open_trades: int = Field(1, ge=1, le=5)
     trades_detail: list[BacktestTrade] = Field(default_factory=list)
-    note: str = "Signals are evaluated on completed M15 bars; entries use the next bar open. Any still-open trade is marked to market at the selected day's final bar close."
+    note: str = (
+        "Signals are evaluated on completed M15 bars; entries use the next bar open. "
+        "Concurrent positions are capped by max_open_trades. Any still-open trade is "
+        "marked to market at the selected day's final bar close."
+    )
