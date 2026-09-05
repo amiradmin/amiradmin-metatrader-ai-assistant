@@ -56,8 +56,8 @@ def test_control_page_has_regime_filter_research_preset() -> None:
     assert 'id="regime_min_atr_ratio"' in html
     assert 'id="researchRegimeBtn"' in html
     assert "function applyResearchRegimePreset()" in html
-    assert "setBound('regime_min_trend_atr',0.2)" in html
-    assert "setBound('regime_min_atr_ratio',0.85)" in html
+    assert "setBound('regime_min_trend_atr',0.18)" in html
+    assert "setBound('regime_min_atr_ratio',0.90)" in html
 
 
 def test_training_page_has_tooltips_and_cross_period_stability() -> None:
