@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from math import ceil
 from random import Random
 from statistics import pstdev
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .backtest_date import ReplaySettings, run_date_backtest
+from .backtest_date import ReplaySettings, run_range_backtest
 from .models import FactorName, HistoryBar, StrategyConfig
 
 
@@ -42,61 +43,75 @@ def _range_metrics(
     reward_risk_ratio: float,
     max_open_trades: int,
 ) -> dict[str, float | int]:
-    balance = starting_balance
-    all_r: list[float] = []
-    daily_r: list[float] = []
-    daily_pnl: list[float] = []
-    wins = losses = signals = buy_trades = sell_trades = 0
+    """Evaluate one split as a continuous range, not day-by-day.
 
-    for selected_date in dates:
-        summary = run_date_backtest(
-            history=history,
-            point=point,
-            selected_date=selected_date,
-            symbol=symbol,
-            timeframe=timeframe,
-            config=config,
-            settings=ReplaySettings(
-                starting_balance=balance,
-                risk_percent=risk_percent,
-                reward_risk_ratio=reward_risk_ratio,
-                max_open_trades=max_open_trades,
-            ),
-        )
-        balance = summary.ending_balance
-        wins += summary.wins
-        losses += summary.losses
-        signals += summary.signals
-        buy_trades += summary.buy_trades
-        sell_trades += summary.sell_trades
-        daily_r.append(summary.net_r)
-        daily_pnl.append(summary.estimated_pnl_money)
-        all_r.extend(trade.r_multiple for trade in summary.trades_detail)
+    The old trainer force-closed trades at every broker-day boundary because it
+    chained daily replays. That made training semantics differ from the newer
+    continuous parity backtester. This function now uses exactly one continuous
+    range replay per split, then reconstructs daily breadth/stability metrics
+    from the resulting closed trades for the optimization objective.
+    """
+    if not dates:
+        raise ValueError("Cannot evaluate an empty training date window.")
 
-    cumulative = peak = max_drawdown_r = 0.0
-    for value in all_r:
-        cumulative += value
-        peak = max(peak, cumulative)
-        max_drawdown_r = max(max_drawdown_r, peak - cumulative)
+    summary = run_range_backtest(
+        history=history,
+        point=point,
+        start_date=dates[0],
+        end_date=dates[-1],
+        symbol=symbol,
+        timeframe=timeframe,
+        config=config,
+        settings=ReplaySettings(
+            starting_balance=starting_balance,
+            risk_percent=risk_percent,
+            reward_risk_ratio=reward_risk_ratio,
+            max_open_trades=max_open_trades,
+        ),
+    )
 
-    trades = len(all_r)
-    net_r = sum(all_r)
-    expectancy_r = net_r / trades if trades else 0.0
     trading_days = len(dates)
+    time_to_date = {bar.time: bar.broker_date for bar in history}
+    daily_r_map = {day: 0.0 for day in dates}
+    daily_pnl_map = {day: 0.0 for day in dates}
+    all_r: list[float] = []
+    for trade in summary.trades_detail:
+        all_r.append(float(trade.r_multiple))
+        day = time_to_date.get(trade.exit_time, dates[-1])
+        if day not in daily_r_map:
+            day = dates[-1]
+        daily_r_map[day] += float(trade.r_multiple)
+        daily_pnl_map[day] += float(trade.pnl_money)
+
+    daily_r = [daily_r_map[day] for day in dates]
+    daily_pnl = [daily_pnl_map[day] for day in dates]
     profitable_days = sum(1 for value in daily_pnl if value > 0)
-    avg_daily_pnl = (balance - starting_balance) / trading_days if trading_days else 0.0
+    profitable_days_percent = profitable_days / trading_days * 100.0 if trading_days else 0.0
+    avg_daily_pnl = summary.estimated_pnl_money / trading_days if trading_days else 0.0
     avg_daily_r = sum(daily_r) / trading_days if trading_days else 0.0
     daily_r_std = pstdev(daily_r) if len(daily_r) > 1 else 0.0
-    win_rate = wins / trades * 100.0 if trades else 0.0
-    profitable_days_percent = profitable_days / trading_days * 100.0 if trading_days else 0.0
 
+    trades = summary.trades
     sample_target = max(8, trading_days // 2)
     sample_factor = min(1.0, trades / sample_target) if sample_target else 0.0
+    profit_factor = float(summary.profit_factor) if summary.profit_factor is not None else 0.0
+
     if trades == 0:
         objective = -9.0
     else:
-        quality = 0.65 * expectancy_r + 0.35 * avg_daily_r
-        stability_penalty = 0.06 * max_drawdown_r + 0.08 * daily_r_std
+        # Optimize primarily in R-space; add a bounded PF term and penalize both
+        # R drawdown and percentage drawdown. Dollar target is tracking-only.
+        pf_edge = _clamp(profit_factor - 1.0, -1.0, 1.0)
+        quality = (
+            0.55 * summary.expectancy_r
+            + 0.25 * avg_daily_r
+            + 0.20 * pf_edge
+        )
+        stability_penalty = (
+            0.05 * summary.max_drawdown_r
+            + 0.08 * daily_r_std
+            + 0.004 * summary.max_drawdown_percent
+        )
         breadth_bonus = 0.05 * (profitable_days_percent / 100.0)
         scarcity_penalty = (1.0 - sample_factor) * 0.50
         objective = quality - stability_penalty + breadth_bonus - scarcity_penalty
@@ -104,22 +119,25 @@ def _range_metrics(
     return {
         "trading_days": trading_days,
         "trades": trades,
-        "signals": signals,
-        "buy_trades": buy_trades,
-        "sell_trades": sell_trades,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 2),
-        "net_r": round(net_r, 4),
-        "expectancy_r": round(expectancy_r, 4),
+        "signals": summary.signals,
+        "buy_trades": summary.buy_trades,
+        "sell_trades": summary.sell_trades,
+        "wins": summary.wins,
+        "losses": summary.losses,
+        "win_rate": round(summary.win_rate, 2),
+        "net_r": round(summary.net_r, 4),
+        "expectancy_r": round(summary.expectancy_r, 4),
+        "profit_factor": round(profit_factor, 4),
         "avg_daily_r": round(avg_daily_r, 4),
-        "max_drawdown_r": round(max_drawdown_r, 4),
+        "max_drawdown_r": round(summary.max_drawdown_r, 4),
+        "max_drawdown_percent": round(summary.max_drawdown_percent, 4),
         "daily_r_std": round(daily_r_std, 4),
         "profitable_days": profitable_days,
         "profitable_days_percent": round(profitable_days_percent, 2),
         "starting_balance": round(starting_balance, 2),
-        "ending_balance": round(balance, 2),
-        "total_pnl": round(balance - starting_balance, 2),
+        "ending_balance": round(summary.ending_balance, 2),
+        "total_pnl": round(summary.estimated_pnl_money, 2),
+        "total_return_percent": round(summary.total_return_percent, 4),
         "avg_daily_pnl": round(avg_daily_pnl, 2),
         "objective": round(objective, 6),
     }
@@ -142,14 +160,22 @@ def _candidate(base: StrategyConfig, rng: Random, index: int) -> StrategyConfig:
     for factor_name in FactorName:
         low, high = factor_bounds[factor_name]
         current = base.factor(factor_name).min_score
-        candidate.factor(factor_name).min_score = _clamp(current + rng.choice(offsets), low, high)
+        candidate.factor(factor_name).min_score = _clamp(
+            current + rng.choice(offsets), low, high
+        )
 
     candidate.decision.min_pass_count = rng.choice((2, 3, 3, 3, 4))
     candidate.decision.min_total_score = _clamp(
-        base.decision.min_total_score + rng.choice((-10.0, -5.0, 0.0, 0.0, 5.0, 10.0)), 38.0, 65.0
+        base.decision.min_total_score
+        + rng.choice((-10.0, -5.0, 0.0, 0.0, 5.0, 10.0)),
+        38.0,
+        65.0,
     )
     candidate.decision.min_side_edge = _clamp(
-        base.decision.min_side_edge + rng.choice((-4.0, -2.0, 0.0, 0.0, 2.0, 4.0)), 5.0, 16.0
+        base.decision.min_side_edge
+        + rng.choice((-4.0, -2.0, 0.0, 0.0, 2.0, 4.0)),
+        5.0,
+        16.0,
     )
     return candidate
 
@@ -163,15 +189,41 @@ def _config_summary(config: StrategyConfig) -> dict[str, float | int | bool]:
     }
 
 
+def _partition_stability_windows(dates: list[str]) -> list[list[str]]:
+    """Create chronological windows for cross-period robustness checks."""
+    if len(dates) >= 80:
+        parts = 4
+    elif len(dates) >= 45:
+        parts = 3
+    else:
+        parts = 2
+    windows: list[list[str]] = []
+    for index in range(parts):
+        start = round(index * len(dates) / parts)
+        end = round((index + 1) * len(dates) / parts)
+        chunk = dates[start:end]
+        if chunk:
+            windows.append(chunk)
+    return windows
+
+
 def train_thresholds(
     *, history: list[HistoryBar], point: float, request: TrainingRequest, base_config: StrategyConfig
 ) -> dict[str, object]:
     if request.start_date > request.end_date:
         raise ValueError("start_date must be <= end_date")
 
-    dates = sorted({bar.broker_date for bar in history if request.start_date <= bar.broker_date <= request.end_date})
+    dates = sorted(
+        {
+            bar.broker_date
+            for bar in history
+            if request.start_date <= bar.broker_date <= request.end_date
+        }
+    )
     if len(dates) < 15:
-        raise ValueError("Training needs at least 15 synced trading days so train/validation/holdout are meaningful.")
+        raise ValueError(
+            "Training needs at least 15 synced trading days so train/validation/holdout are meaningful."
+        )
 
     train_end = max(1, int(len(dates) * 0.60))
     validation_end = max(train_end + 1, int(len(dates) * 0.80))
@@ -194,11 +246,15 @@ def train_thresholds(
     }
 
     baseline_train = _range_metrics(dates=train_dates, config=base_config, **kwargs)
-    baseline_validation = _range_metrics(dates=validation_dates, config=base_config, **kwargs)
+    baseline_validation = _range_metrics(
+        dates=validation_dates, config=base_config, **kwargs
+    )
     baseline_holdout = _range_metrics(dates=holdout_dates, config=base_config, **kwargs)
 
     rng = Random(request.seed)
-    train_ranked: list[tuple[float, int, StrategyConfig, dict[str, float | int]]] = []
+    train_ranked: list[
+        tuple[float, int, StrategyConfig, dict[str, float | int]]
+    ] = []
     seen: set[tuple[object, ...]] = set()
     for index in range(request.iterations):
         config = _candidate(base_config, rng, index)
@@ -214,49 +270,125 @@ def train_thresholds(
     train_ranked.sort(key=lambda row: row[0], reverse=True)
 
     finalists: list[dict[str, object]] = []
-    for train_score, index, config, train_metrics in train_ranked[: min(6, len(train_ranked))]:
-        validation_metrics = _range_metrics(dates=validation_dates, config=config, **kwargs)
-        finalists.append({
-            "index": index,
-            "config": config,
-            "train": train_metrics,
-            "validation": validation_metrics,
-            "selection_score": float(validation_metrics["objective"]),
-            "train_score": train_score,
-        })
+    for train_score, index, config, train_metrics in train_ranked[
+        : min(6, len(train_ranked))
+    ]:
+        validation_metrics = _range_metrics(
+            dates=validation_dates, config=config, **kwargs
+        )
+        finalists.append(
+            {
+                "index": index,
+                "config": config,
+                "train": train_metrics,
+                "validation": validation_metrics,
+                "selection_score": float(validation_metrics["objective"]),
+                "train_score": train_score,
+            }
+        )
 
     finalists.sort(key=lambda row: float(row["selection_score"]), reverse=True)
     winner = finalists[0]
     winner_config = winner["config"]
     assert isinstance(winner_config, StrategyConfig)
-    holdout_metrics = _range_metrics(dates=holdout_dates, config=winner_config, **kwargs)
+    holdout_metrics = _range_metrics(
+        dates=holdout_dates, config=winner_config, **kwargs
+    )
+
+    stability_rows: list[dict[str, object]] = []
+    stability_windows = _partition_stability_windows(dates)
+    for index, window_dates in enumerate(stability_windows, start=1):
+        baseline_window = _range_metrics(
+            dates=window_dates, config=base_config, **kwargs
+        )
+        candidate_window = _range_metrics(
+            dates=window_dates, config=winner_config, **kwargs
+        )
+        stability_rows.append(
+            {
+                "window": index,
+                "range": [window_dates[0], window_dates[-1]],
+                "baseline": baseline_window,
+                "candidate": candidate_window,
+                "candidate_positive": (
+                    float(candidate_window["expectancy_r"]) > 0
+                    and float(candidate_window.get("profit_factor", 0.0)) > 1.0
+                ),
+                "beats_baseline": float(candidate_window["objective"])
+                > float(baseline_window["objective"]),
+            }
+        )
+
+    positive_windows = sum(
+        1 for row in stability_rows if bool(row["candidate_positive"])
+    )
+    beats_baseline_windows = sum(
+        1 for row in stability_rows if bool(row["beats_baseline"])
+    )
+    required_positive_windows = max(1, ceil(len(stability_rows) * 0.60))
+    required_beats_windows = max(1, ceil(len(stability_rows) * 0.50))
 
     baseline_holdout_objective = float(baseline_holdout["objective"])
     holdout_objective = float(holdout_metrics["objective"])
     holdout_trades = int(holdout_metrics["trades"])
     holdout_expectancy = float(holdout_metrics["expectancy_r"])
+    holdout_pf = float(holdout_metrics.get("profit_factor", 0.0))
+    holdout_dd_percent = float(holdout_metrics.get("max_drawdown_percent", 100.0))
     min_holdout_trades = max(3, len(holdout_dates) // 3)
+
     promising = (
         holdout_trades >= min_holdout_trades
         and holdout_expectancy > 0
+        and holdout_pf > 1.0
         and holdout_objective > baseline_holdout_objective
+        and holdout_dd_percent <= 25.0
+        and positive_windows >= required_positive_windows
+        and beats_baseline_windows >= required_beats_windows
     )
 
     top_candidates: list[dict[str, object]] = []
     for row in finalists[:5]:
         cfg = row["config"]
         assert isinstance(cfg, StrategyConfig)
-        top_candidates.append({
-            "index": row["index"],
-            "config": _config_summary(cfg),
-            "train": row["train"],
-            "validation": row["validation"],
-        })
+        top_candidates.append(
+            {
+                "index": row["index"],
+                "config": _config_summary(cfg),
+                "train": row["train"],
+                "validation": row["validation"],
+            }
+        )
+
+    if promising:
+        promotion_reason = (
+            "Holdout is profitable, PF>1, drawdown is controlled, and the candidate is "
+            "positive across enough independent time windows. Promote only to DEMO/forward testing."
+        )
+    else:
+        failures: list[str] = []
+        if holdout_trades < min_holdout_trades:
+            failures.append("not enough holdout trades")
+        if holdout_expectancy <= 0:
+            failures.append("holdout expectancy is not positive")
+        if holdout_pf <= 1.0:
+            failures.append("holdout profit factor is not above 1")
+        if holdout_objective <= baseline_holdout_objective:
+            failures.append("holdout did not beat baseline")
+        if holdout_dd_percent > 25.0:
+            failures.append("holdout drawdown is above 25%")
+        if positive_windows < required_positive_windows:
+            failures.append("too few positive stability windows")
+        if beats_baseline_windows < required_beats_windows:
+            failures.append("candidate does not beat baseline in enough windows")
+        promotion_reason = "Keep the stable baseline: " + "; ".join(failures) + "."
 
     return {
         "status": "PROMISING" if promising else "NEEDS_MORE_WORK",
-        "method": "chronological walk-forward threshold search",
-        "warning": "Historical optimization can overfit. A candidate must still prove itself in DEMO/forward trading before real-money use.",
+        "method": "continuous chronological walk-forward + cross-period stability",
+        "warning": (
+            "Historical optimization can overfit. Candidate promotion is DEMO-only and "
+            "still requires forward evidence before any real-money consideration."
+        ),
         "target_daily_pnl": request.target_daily_pnl,
         "max_open_trades": request.max_open_trades,
         "base_profile": request.base_profile,
@@ -283,13 +415,20 @@ def train_thresholds(
             "train": winner["train"],
             "validation": winner["validation"],
             "holdout": holdout_metrics,
-            "holdout_avg_daily_gap_to_target": round(float(holdout_metrics["avg_daily_pnl"]) - request.target_daily_pnl, 2),
+            "holdout_avg_daily_gap_to_target": round(
+                float(holdout_metrics["avg_daily_pnl"]) - request.target_daily_pnl,
+                2,
+            ),
+        },
+        "stability": {
+            "windows": stability_rows,
+            "window_count": len(stability_rows),
+            "positive_windows": positive_windows,
+            "required_positive_windows": required_positive_windows,
+            "beats_baseline_windows": beats_baseline_windows,
+            "required_beats_baseline_windows": required_beats_windows,
         },
         "top_candidates": top_candidates,
         "promotion_allowed": promising,
-        "promotion_reason": (
-            "Holdout beat the baseline with positive expectancy and enough trades. Promote only to DEMO/forward testing."
-            if promising
-            else "Candidate did not clear the holdout promotion gates; keep the current stable baseline."
-        ),
+        "promotion_reason": promotion_reason,
     }
