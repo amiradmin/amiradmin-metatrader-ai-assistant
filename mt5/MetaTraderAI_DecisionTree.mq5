@@ -26,16 +26,22 @@ input int MaxStopPoints = 1200;
 input int PanelLeft = 20;
 input int PanelTop = 30;
 input int PanelWidth = 610;
-input int PanelHeight = 455;
+input int PanelHeight = 480;
 input int PanelFontSize = 12;
 
 CTrade Trade;
 int AtrHandle = INVALID_HANDLE;
 ulong LastSignalCheckMs = 0;
 string LastExecutedSignalId = "";
+datetime LastExecutedBarTime = 0;
 string ActiveSignalId = "";
 double ActiveInitialRiskMoney = 0.0;
 string PanelPrefix = "MTAI6_";
+
+string ExecutedBarGlobalName()
+{
+   return "MTAI6_LASTBAR_" + TradeSymbol + "_" + IntegerToString((int)MagicNumber);
+}
 
 string AccountModeText()
 {
@@ -199,6 +205,7 @@ bool HttpPostJson(const string url, const string payload, string &response)
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
    string response_headers;
    StringToCharArray(payload, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(data) > 0) ArrayResize(data, ArraySize(data)-1);
    ResetLastError();
    int code = WebRequest("POST", url, headers, RequestTimeoutMs, data, result, response_headers);
    if(code < 0)
@@ -295,8 +302,10 @@ void DrawDecisionPanel(const string json)
 
    string status = allowed ? "EXECUTION: ARMED - signal may open a DEMO position" : "EXECUTION: BLOCKED / WAIT";
    SetPanelText("EXEC",status,14,350,allowed ? clrLime : clrGold,PanelFontSize);
-   SetPanelText("CFG","Thresholds are live from Bridge: GET/PUT /strategy/config",14,380,clrSilver,PanelFontSize-1);
-   SetPanelText("SAFE","Local hard gate: DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,405,clrSilver,PanelFontSize-1);
+   string blocker=JsonString(json,"primary_blocker","");
+   SetPanelText("WHY",blocker=="" ? "WHY: all decision gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
+   SetPanelText("CFG","Thresholds are live from Bridge: /control or GET/PUT /strategy/config",14,400,clrSilver,PanelFontSize-1);
+   SetPanelText("SAFE","Local hard gate: DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,clrSilver,PanelFontSize-1);
    ChartRedraw();
 }
 
@@ -378,6 +387,8 @@ void MaybeExecute(const string json)
    if(side!="BUY" && side!="SELL") return;
    string signal_id=JsonString(json,"signal_id","");
    if(signal_id=="" || signal_id==LastExecutedSignalId) return;
+   datetime completed_bar=iTime(TradeSymbol,AnalysisTimeframe,1);
+   if(completed_bar<=0 || completed_bar<=LastExecutedBarTime) return;
    if(ManagedOpenPositions() >= MaxOpenTrades) return;
 
    double stop=0,target=0,volume=0,risk_money=0;
@@ -400,6 +411,8 @@ void MaybeExecute(const string json)
       return;
    }
    LastExecutedSignalId=signal_id;
+   LastExecutedBarTime=completed_bar;
+   GlobalVariableSet(ExecutedBarGlobalName(),(double)LastExecutedBarTime);
    ActiveSignalId=signal_id;
    ActiveInitialRiskMoney=risk_money;
    Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2));
@@ -453,9 +466,13 @@ void AnalyzeNow()
 
 int OnInit()
 {
-   if(!SymbolSelect(TradeSymbol,true)) return INIT_FAILED;
+   if(!SymbolSelect(TradeSymbol,true))
+      return INIT_FAILED;
    AtrHandle=iATR(TradeSymbol,AnalysisTimeframe,AtrPeriod);
-   if(AtrHandle==INVALID_HANDLE) return INIT_FAILED;
+   if(AtrHandle==INVALID_HANDLE)
+      return INIT_FAILED;
+   if(GlobalVariableCheck(ExecutedBarGlobalName()))
+      LastExecutedBarTime=(datetime)GlobalVariableGet(ExecutedBarGlobalName());
    EventSetTimer(1);
    DrawPanelBackground();
    SetPanelText("TITLE","META TRADER AI v2 | STARTING...",14,12,clrWhite,PanelFontSize+1);
@@ -472,7 +489,8 @@ void OnTimer()
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
 {
-   if(trans.type==TRADE_TRANSACTION_DEAL_ADD) RecordClosedDeal(trans.deal);
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD)
+      RecordClosedDeal(trans.deal);
 }
 
 void OnDeinit(const int reason)
