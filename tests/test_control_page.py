@@ -25,6 +25,8 @@ def test_control_page_has_persian_parameter_tooltips() -> None:
     assert "حداقل تعداد فاکتورهایی" in html
     assert "حداکثر تعداد پوزیشن‌های هم‌زمان" in html
     assert "درصد Equity" in html
+    assert "بازار کم‌روند یا کم‌تحرک" in html
+    assert "فاصله EMA20 و EMA50" in html
     assert "function attachTooltips()" in html
     assert 'className=\'tip\'' in html
 
@@ -44,6 +46,18 @@ def test_control_page_has_one_click_research_candidate() -> None:
     assert "setBound('reward_risk_ratio',2)" in html
     assert 'id="risk_percent"' in html
     assert 'id="reward_risk_ratio"' in html
+
+
+def test_control_page_has_regime_filter_research_preset() -> None:
+    html = control_page_html()
+
+    assert 'id="regime_filter_enabled"' in html
+    assert 'id="regime_min_trend_atr"' in html
+    assert 'id="regime_min_atr_ratio"' in html
+    assert 'id="researchRegimeBtn"' in html
+    assert "function applyResearchRegimePreset()" in html
+    assert "setBound('regime_min_trend_atr',0.2)" in html
+    assert "setBound('regime_min_atr_ratio',0.85)" in html
 
 
 def test_training_page_has_tooltips_and_cross_period_stability() -> None:
