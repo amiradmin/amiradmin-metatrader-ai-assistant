@@ -1,5 +1,5 @@
 #property strict
-#property version   "0.20"
+#property version   "0.21"
 #property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution and historical replay sync"
 
 #include <Trade/Trade.mqh>
@@ -12,6 +12,7 @@ input int SignalSeconds = 15;
 input int RequestTimeoutMs = 10000;
 input int HistorySyncBars = 5000;
 input int HistorySyncSeconds = 600;
+input int HistoryInitialRetrySeconds = 10;
 
 input bool EnableAutoTrading = true;
 input bool DemoOnly = true;
@@ -35,6 +36,8 @@ CTrade Trade;
 int AtrHandle = INVALID_HANDLE;
 ulong LastSignalCheckMs = 0;
 ulong LastHistorySyncMs = 0;
+ulong LastHistoryAttemptMs = 0;
+string HistorySyncState = "PENDING";
 string LastExecutedSignalId = "";
 datetime LastExecutedBarTime = 0;
 string ActiveSignalId = "";
@@ -303,17 +306,25 @@ bool HttpPostJson(const string url, const string payload, string &response)
    return true;
 }
 
-void SyncHistoryNow()
+bool SyncHistoryNow()
 {
    string payload;
    if(!BuildHistorySyncJson(payload))
    {
-      Print("MetaTraderAI history sync: not enough M15 history yet.");
-      return;
+      HistorySyncState = "WAIT_DATA";
+      Print("MetaTraderAI history sync: not enough M15 history yet; retrying soon.");
+      return false;
    }
    string response;
-   if(HttpPostJson(BridgeBaseUrl+"/history/sync", payload, response))
-      Print("MetaTraderAI history synced to Bridge: ", response);
+   if(!HttpPostJson(BridgeBaseUrl+"/history/sync", payload, response))
+   {
+      HistorySyncState = "FAILED";
+      Print("MetaTraderAI history sync failed; retrying soon.");
+      return false;
+   }
+   HistorySyncState = "SYNCED";
+   Print("MetaTraderAI history synced to Bridge: ", response);
+   return true;
 }
 
 void EnsurePanelObject(const string name, const int x, const int y, const int font_size=12)
@@ -428,7 +439,7 @@ void DrawDecisionPanel(const string json)
    else if(bridge_allowed && !algo_ready) blocker="Algo Trading is disabled in terminal or EA";
    else if(bridge_allowed && !demo_ready) blocker="DemoOnly=true but account is not DEMO";
    SetPanelText("WHY",blocker=="" ? "WHY: all decision + local execution gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
-   SetPanelText("CFG","Thresholds + date backtest: Bridge /control",14,400,clrSilver,PanelFontSize-1);
+   SetPanelText("CFG","Thresholds + date backtest: Bridge /control | History="+HistorySyncState,14,400,HistorySyncState=="SYNCED"?clrSilver:clrGold,PanelFontSize-1);
    SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
    ChartRedraw();
 }
@@ -608,10 +619,16 @@ void OnTimer()
 {
    ulong now=GetTickCount64();
 
-   if(LastHistorySyncMs == 0 || now-LastHistorySyncMs >= (ulong)MathMax(60,HistorySyncSeconds)*1000)
+   ulong history_interval_ms = (ulong)MathMax(1, HistoryInitialRetrySeconds) * 1000;
+   if(LastHistorySyncMs > 0)
+      history_interval_ms = (ulong)MathMax(60, HistorySyncSeconds) * 1000;
+
+   ulong history_anchor_ms = LastHistorySyncMs > 0 ? LastHistorySyncMs : LastHistoryAttemptMs;
+   if(LastHistoryAttemptMs == 0 || now-history_anchor_ms >= history_interval_ms)
    {
-      LastHistorySyncMs=now;
-      SyncHistoryNow();
+      LastHistoryAttemptMs = now;
+      if(SyncHistoryNow())
+         LastHistorySyncMs = now;
    }
 
    if(now-LastSignalCheckMs < (ulong)MathMax(1,SignalSeconds)*1000) return;
