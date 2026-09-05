@@ -1,0 +1,13 @@
+{
+  "status": "BLOCKED_PLAN",
+  "provider": "LONA Trading Assistant",
+  "strategy_name": "MTAI Six-Factor Stable Baseline",
+  "strategy_id": "38e191f0-d1b2-4a7e-acc8-e41cf6219ef7",
+  "symbol": "XAU/USD",
+  "symbol_id": "969fe00a-b54c-4622-aefd-f8d873f2e73c",
+  "frequency": "15m",
+  "requested_start": "2022-06-13",
+  "requested_end": "2026-09-04",
+  "message": "Independent LONA strategy was created successfully, but LONA rejected the 15m global-data backtest because intraday global backtests are not enabled for the connected plan. Uploading our own MT5 CSV is the preferred next path so LONA validates the exact LiteFinance history.",
+  "metrics": null
+}
