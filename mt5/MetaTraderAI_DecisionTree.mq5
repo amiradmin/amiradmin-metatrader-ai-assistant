@@ -1,6 +1,6 @@
 #property strict
-#property version   "0.21"
-#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution and historical replay sync"
+#property version   "0.22"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge concurrency control and historical replay sync"
 
 #include <Trade/Trade.mqh>
 
@@ -18,7 +18,8 @@ input bool EnableAutoTrading = true;
 input bool DemoOnly = true;
 input double RiskPercent = 0.50;
 input double RewardRiskRatio = 2.0;
-input int MaxOpenTrades = 1;
+// Local hard ceiling. Bridge /control can choose 1..5, but can never exceed this.
+input int MaxOpenTrades = 5;
 input int SlippagePoints = 20;
 input ulong MagicNumber = 26090501;
 input int AtrPeriod = 14;
@@ -40,13 +41,16 @@ ulong LastHistoryAttemptMs = 0;
 string HistorySyncState = "PENDING";
 string LastExecutedSignalId = "";
 datetime LastExecutedBarTime = 0;
-string ActiveSignalId = "";
-double ActiveInitialRiskMoney = 0.0;
 string PanelPrefix = "MTAI6_";
 
 string ExecutedBarGlobalName()
 {
    return "MTAI6_LASTBAR_" + TradeSymbol + "_" + IntegerToString((int)MagicNumber);
+}
+
+string PositionRiskGlobalName(const long position_id)
+{
+   return "MTAI6_RISK_" + IntegerToString((int)position_id);
 }
 
 string AccountModeText()
@@ -168,6 +172,14 @@ double JsonNumber(const string json, const string key, const double fallback=0.0
    string value = StringSubstr(json,p,e-p);
    if(value == "null" || value == "") return fallback;
    return StringToDouble(value);
+}
+
+int EffectiveMaxOpenTrades(const string json)
+{
+   int bridge_max=(int)JsonNumber(json,"max_open_trades",1);
+   bridge_max=MathMax(1,MathMin(5,bridge_max));
+   int local_max=MathMax(1,MathMin(5,MaxOpenTrades));
+   return MathMin(local_max,bridge_max);
 }
 
 string FactorObject(const string json, const string factor_name)
@@ -378,6 +390,8 @@ void DrawDecisionPanel(const string json)
    double sell_score = JsonNumber(json,"sell_score",0);
    int passed_count = (int)JsonNumber(json,"passed_count",0);
    int min_pass = (int)JsonNumber(json,"min_pass_count",4);
+   int bridge_max = MathMax(1,MathMin(5,(int)JsonNumber(json,"max_open_trades",1)));
+   int effective_max = EffectiveMaxOpenTrades(json);
    bool bridge_allowed = JsonBool(json,"trade_allowed",false);
    bool market_open = MarketSessionOpenNow();
    bool algo_ready = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED);
@@ -439,8 +453,8 @@ void DrawDecisionPanel(const string json)
    else if(bridge_allowed && !algo_ready) blocker="Algo Trading is disabled in terminal or EA";
    else if(bridge_allowed && !demo_ready) blocker="DemoOnly=true but account is not DEMO";
    SetPanelText("WHY",blocker=="" ? "WHY: all decision + local execution gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
-   SetPanelText("CFG","Thresholds + date backtest: Bridge /control | History="+HistorySyncState,14,400,HistorySyncState=="SYNCED"?clrSilver:clrGold,PanelFontSize-1);
-   SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
+   SetPanelText("CFG","Thresholds + replay: Bridge /control | History="+HistorySyncState,14,400,HistorySyncState=="SYNCED"?clrSilver:clrGold,PanelFontSize-1);
+   SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | MaxOpen="+IntegerToString(effective_max)+" (B"+IntegerToString(bridge_max)+"/L"+IntegerToString(MaxOpenTrades)+") | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
    ChartRedraw();
 }
 
@@ -525,7 +539,8 @@ void MaybeExecute(const string json)
    if(signal_id=="" || signal_id==LastExecutedSignalId) return;
    datetime completed_bar=iTime(TradeSymbol,AnalysisTimeframe,1);
    if(completed_bar<=0 || completed_bar<=LastExecutedBarTime) return;
-   if(ManagedOpenPositions() >= MaxOpenTrades) return;
+   int effective_max=EffectiveMaxOpenTrades(json);
+   if(ManagedOpenPositions() >= effective_max) return;
 
    double stop=0,target=0,volume=0,risk_money=0;
    if(!BuildTradePlan(side,stop,target,volume,risk_money))
@@ -549,9 +564,33 @@ void MaybeExecute(const string json)
    LastExecutedSignalId=signal_id;
    LastExecutedBarTime=completed_bar;
    GlobalVariableSet(ExecutedBarGlobalName(),(double)LastExecutedBarTime);
-   ActiveSignalId=signal_id;
-   ActiveInitialRiskMoney=risk_money;
-   Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2));
+
+   ulong entry_deal=Trade.ResultDeal();
+   if(entry_deal>0 && HistoryDealSelect(entry_deal))
+   {
+      long position_id=(long)HistoryDealGetInteger(entry_deal,DEAL_POSITION_ID);
+      if(position_id>0)
+         GlobalVariableSet(PositionRiskGlobalName(position_id),risk_money);
+   }
+   Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2)," maxOpen=",effective_max);
+}
+
+string EntrySignalForPosition(const long position_id)
+{
+   if(position_id<=0 || !HistorySelectByPosition((ulong)position_id)) return "";
+   int total=HistoryDealsTotal();
+   for(int i=0;i<total;i++)
+   {
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
+      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY);
+      if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_INOUT) continue;
+      if((ulong)HistoryDealGetInteger(ticket,DEAL_MAGIC)!=MagicNumber) continue;
+      string comment=HistoryDealGetString(ticket,DEAL_COMMENT);
+      if(StringFind(comment,"MTAI6 ")==0)
+         return StringSubstr(comment,6);
+   }
+   return "";
 }
 
 void RecordClosedDeal(const ulong deal_ticket)
@@ -561,23 +600,30 @@ void RecordClosedDeal(const ulong deal_ticket)
    if((ulong)HistoryDealGetInteger(deal_ticket,DEAL_MAGIC)!=MagicNumber) return;
    ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal_ticket,DEAL_ENTRY);
    if(entry!=DEAL_ENTRY_OUT && entry!=DEAL_ENTRY_OUT_BY) return;
-   if(ActiveSignalId=="" || ActiveInitialRiskMoney<=0) return;
 
    double pnl=HistoryDealGetDouble(deal_ticket,DEAL_PROFIT)+HistoryDealGetDouble(deal_ticket,DEAL_SWAP)+HistoryDealGetDouble(deal_ticket,DEAL_COMMISSION);
-   double r=pnl/ActiveInitialRiskMoney;
    ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket,DEAL_TYPE);
+   long position_id=(long)HistoryDealGetInteger(deal_ticket,DEAL_POSITION_ID);
+   string risk_name=PositionRiskGlobalName(position_id);
+   double initial_risk=GlobalVariableCheck(risk_name) ? GlobalVariableGet(risk_name) : 0.0;
+   string signal_id=EntrySignalForPosition(position_id);
+   if(initial_risk<=0 || signal_id=="")
+   {
+      Print("MetaTraderAI close outcome could not be linked to entry position_id=",position_id);
+      return;
+   }
+   double r=pnl/initial_risk;
    string closed_side = type==DEAL_TYPE_SELL ? "BUY" : "SELL";
    string payload="{";
-   payload+="\"signal_id\":\""+JsonEscape(ActiveSignalId)+"\",";
+   payload+="\"signal_id\":\""+JsonEscape(signal_id)+"\",";
    payload+="\"symbol\":\""+JsonEscape(TradeSymbol)+"\",";
    payload+="\"side\":\""+closed_side+"\",";
    payload+="\"pnl_money\":"+DoubleToString(pnl,2)+",";
    payload+="\"r_multiple\":"+DoubleToString(r,6)+"}";
    string response;
    if(HttpPostJson(BridgeBaseUrl+"/performance/trades",payload,response))
-      Print("MetaTraderAI recorded outcome: ",DoubleToString(r,2),"R | ",response);
-   ActiveSignalId="";
-   ActiveInitialRiskMoney=0.0;
+      Print("MetaTraderAI recorded outcome: ",DoubleToString(r,2),"R | signal=",signal_id," | ",response);
+   GlobalVariableDel(risk_name);
 }
 
 void AnalyzeNow()
