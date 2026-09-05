@@ -22,7 +22,10 @@ def test_decision_is_explainable() -> None:
     assert {f.name.value for f in response.factors} == {"dynamic_levels", "static_levels", "fibonacci", "patterns", "pivots", "divergence"}
     assert response.buy_score >= 0
     assert response.sell_score >= 0
-    assert len(response.safety) >= 3
+    assert len(response.safety) >= 4
+    regime_gate = next(g for g in response.safety if g.name == "market_regime")
+    assert regime_gate.passed is True
+    assert "disabled" in regime_gate.reason
 
 
 def test_decision_exposes_bridge_live_risk_and_reward_ratio() -> None:
@@ -58,3 +61,22 @@ def test_real_account_is_blocked_by_default() -> None:
     response = build_decision(s, StrategyConfig())
     assert response.trade_allowed is False
     assert any("account_mode" in blocker for blocker in response.blockers) or response.candidate.value == "WAIT"
+
+
+def test_market_regime_filter_can_block_entry() -> None:
+    config = StrategyConfig()
+    config.dynamic_levels.required = False
+    config.static_levels.required = False
+    config.decision.min_pass_count = 1
+    config.decision.min_total_score = 0
+    config.decision.min_side_edge = 0
+    config.safety.regime_filter_enabled = True
+    config.safety.regime_min_trend_atr = 5.0
+    config.safety.regime_min_atr_ratio = 0.1
+
+    response = build_decision(snapshot(), config)
+    regime_gate = next(g for g in response.safety if g.name == "market_regime")
+
+    assert regime_gate.passed is False
+    assert response.trade_allowed is False
+    assert any("regime trend=" in blocker for blocker in response.blockers)
