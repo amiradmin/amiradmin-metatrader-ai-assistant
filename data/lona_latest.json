@@ -1,13 +1,22 @@
 {
-  "status": "BLOCKED_PLAN",
+  "status": "COMPLETED",
   "provider": "LONA Trading Assistant",
-  "strategy_name": "MTAI Six-Factor Stable Baseline",
+  "strategy_name": "MTAI Six-Factor Stable Baseline v1.0.0",
   "strategy_id": "38e191f0-d1b2-4a7e-acc8-e41cf6219ef7",
-  "symbol": "XAU/USD",
-  "symbol_id": "969fe00a-b54c-4622-aefd-f8d873f2e73c",
+  "report_id": "87b6bf83-d7b7-47bf-b3d8-b531f82a2621",
+  "symbol": "XAUUSD_o",
+  "symbol_id": "5971a9c3-0671-4acb-b785-19e849c4901b",
   "frequency": "15m",
   "requested_start": "2022-06-13",
   "requested_end": "2026-09-04",
-  "message": "Independent LONA strategy was created successfully, but LONA rejected the 15m global-data backtest because intraday global backtests are not enabled for the connected plan. Uploading our own MT5 CSV is the preferred next path so LONA validates the exact LiteFinance history.",
-  "metrics": null
+  "message": "Independent LONA run completed on the uploaded 100,000-bar LiteFinance MT5 dataset, but produced 0 trades. Treat this as a cross-engine parity warning, not evidence that the stable baseline has no signals. A permissive diagnostic run is being used to separate execution/data issues from strategy-logic mismatch.",
+  "metrics": {
+    "total_return": 0.0,
+    "sharpe_ratio": 0.0,
+    "max_drawdown": 0.0,
+    "win_rate": 0.0,
+    "trades": 0,
+    "final_portfolio_value": 1000.0,
+    "expectancy": 0.0
+  }
 }
