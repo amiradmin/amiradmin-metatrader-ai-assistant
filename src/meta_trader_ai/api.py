@@ -7,6 +7,7 @@ from .backtest_date import ReplaySettings, run_date_backtest, run_range_backtest
 from .config_store import StrategyConfigStore
 from .control_page import control_page_html
 from .decision_engine import build_decision
+from .external_signals import ExternalSignalHub
 from .history import HistoryStore
 from .journal import DecisionJournal
 from .learning import model_recommended_config, recommend_thresholds
@@ -27,12 +28,13 @@ from .performance import PerformanceStore
 from .training import TrainingRequest, train_thresholds
 from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.4")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.5")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
 history_store = HistoryStore()
 lona_store = LonaReportStore()
+signal_hub = ExternalSignalHub()
 
 
 @app.get("/health")
@@ -45,6 +47,7 @@ def health() -> dict[str, str]:
         "training_lab": "multi-position-enabled",
         "lona_validation": "panel-enabled",
         "cross_engine_comparison": "continuous-parity-enabled",
+        "signal_overlays": "optional-live-modifiers-enabled",
     }
 
 
@@ -58,12 +61,18 @@ def put_strategy_config(config: StrategyConfig) -> StrategyConfig:
     return config_store.save(config)
 
 
+@app.get("/integrations/status")
+def integrations_status() -> dict[str, dict[str, object]]:
+    return signal_hub.status(config_store.load())
+
+
 def _recommended_payload() -> dict[str, object]:
     current = config_store.load()
     recommended, learning, source = model_recommended_config(
         performance_store.load(), decision_journal
     )
     recommended.safety = current.safety.model_copy(deep=True)
+    recommended.integrations = current.integrations.model_copy(deep=True)
     return {
         "source": source,
         "sample_size": learning.sample_size,
@@ -72,7 +81,7 @@ def _recommended_payload() -> dict[str, object]:
         "config": recommended.model_dump(mode="json"),
         "proposed_thresholds": learning.proposed_thresholds,
         "reasons": learning.reasons,
-        "risk_policy": "Signal thresholds only; execution limits and risk are not raised automatically.",
+        "risk_policy": "Signal thresholds only; execution limits, risk and integration toggles are not raised automatically.",
     }
 
 
@@ -88,12 +97,20 @@ def apply_recommended_strategy() -> StrategyConfig:
         performance_store.load(), decision_journal
     )
     recommended.safety = current.safety.model_copy(deep=True)
+    recommended.integrations = current.integrations.model_copy(deep=True)
     return config_store.save(recommended)
 
 
 @app.post("/analyze", response_model=DecisionResponse)
 def analyze(snapshot: MarketSnapshot) -> DecisionResponse:
-    response = build_decision(snapshot, config_store.load(), performance_store.summary())
+    config = config_store.load()
+    overlays = signal_hub.collect(snapshot, config)
+    response = build_decision(
+        snapshot,
+        config,
+        performance_store.summary(),
+        overlays=overlays,
+    )
     decision_journal.append(response.model_dump(mode="json"))
     return response
 
