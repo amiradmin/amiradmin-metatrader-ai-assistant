@@ -53,6 +53,14 @@ class SafetyConfig(BaseModel):
     regime_min_atr_ratio: float = Field(0.85, ge=0.1, le=5.0)
 
 
+class IntegrationConfig(BaseModel):
+    """Live signal overlays that can be independently inserted into the workflow."""
+
+    myfxbook_enabled: bool = False
+    order_flow_enabled: bool = False
+    cot_enabled: bool = False
+
+
 class StrategyConfig(BaseModel):
     dynamic_levels: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=True)
     static_levels: FactorConfig = FactorConfig(min_score=50, weight=1.2, required=True)
@@ -62,6 +70,7 @@ class StrategyConfig(BaseModel):
     divergence: FactorConfig = FactorConfig(min_score=40, weight=1.0, required=False)
     decision: DecisionRuleConfig = DecisionRuleConfig()
     safety: SafetyConfig = SafetyConfig()
+    integrations: IntegrationConfig = IntegrationConfig()
 
     def factor(self, name: FactorName) -> FactorConfig:
         return getattr(self, name.value)
@@ -73,6 +82,9 @@ class Bar(BaseModel):
     high: float
     low: float
     close: float
+    # Optional for forward compatibility with richer MT5 snapshots. Older EA
+    # versions omit it, in which case order-flow uses a conservative OHLC proxy.
+    tick_volume: float = Field(0.0, ge=0)
 
     @model_validator(mode="after")
     def validate_ohlc(self) -> "Bar":
@@ -121,6 +133,15 @@ class SafetyGate(BaseModel):
     reason: str
 
 
+class SignalOverlay(BaseModel):
+    source: Literal["myfxbook", "order_flow", "cot"]
+    available: bool
+    buy_modifier: float = 0.0
+    sell_modifier: float = 0.0
+    reason: str = ""
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class PerformanceSummary(BaseModel):
     trades: int = 0
     win_rate: float = 0.0
@@ -147,6 +168,11 @@ class DecisionResponse(BaseModel):
     max_open_trades: int = Field(1, ge=1, le=5)
     risk_percent: float = Field(0.5, gt=0, le=5.0)
     reward_risk_ratio: float = Field(2.0, ge=0.5, le=10.0)
+    base_buy_score: float = 0.0
+    base_sell_score: float = 0.0
+    overlay_buy_modifier: float = 0.0
+    overlay_sell_modifier: float = 0.0
+    overlays: list[SignalOverlay] = Field(default_factory=list)
     blockers: list[str]
     primary_blocker: str | None = None
     factors: list[FactorScore]
