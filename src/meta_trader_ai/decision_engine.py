@@ -108,6 +108,8 @@ def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance
         passed_count=passed_count,
         min_pass_count=config.decision.min_pass_count,
         max_open_trades=config.safety.max_open_trades,
+        risk_percent=config.safety.risk_percent,
+        reward_risk_ratio=config.safety.reward_risk_ratio,
         blockers=blockers,
         primary_blocker=blockers[0] if blockers else None,
         factors=factors,
