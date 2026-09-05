@@ -8,7 +8,7 @@ from .config_store import StrategyConfigStore
 from .decision_engine import build_decision
 from .history import HistoryStore
 from .journal import DecisionJournal
-from .learning import recommend_thresholds
+from .learning import model_recommended_config, recommend_thresholds
 from .models import (
     BacktestSummary,
     DecisionResponse,
@@ -22,7 +22,7 @@ from .models import (
 )
 from .performance import PerformanceStore
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.2.0")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.2.1")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
@@ -47,6 +47,37 @@ def get_strategy_config() -> StrategyConfig:
 @app.put("/strategy/config", response_model=StrategyConfig)
 def put_strategy_config(config: StrategyConfig) -> StrategyConfig:
     return config_store.save(config)
+
+
+def _recommended_payload() -> dict[str, object]:
+    recommended, learning, source = model_recommended_config(
+        performance_store.load(),
+        decision_journal,
+    )
+    return {
+        "source": source,
+        "sample_size": learning.sample_size,
+        "learning_status": learning.status,
+        "current_expectancy_r": learning.current_expectancy_r,
+        "config": recommended.model_dump(mode="json"),
+        "proposed_thresholds": learning.proposed_thresholds,
+        "reasons": learning.reasons,
+        "risk_policy": "Signal thresholds only; risk is never increased automatically.",
+    }
+
+
+@app.get("/strategy/recommended")
+def get_recommended_strategy() -> dict[str, object]:
+    return _recommended_payload()
+
+
+@app.post("/strategy/apply-recommended", response_model=StrategyConfig)
+def apply_recommended_strategy() -> StrategyConfig:
+    recommended, _, _ = model_recommended_config(
+        performance_store.load(),
+        decision_journal,
+    )
+    return config_store.save(recommended)
 
 
 @app.post("/analyze", response_model=DecisionResponse)
@@ -121,7 +152,7 @@ def control_panel() -> str:
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MetaTrader AI Bridge Control</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#111827;color:#e5e7eb;margin:0;padding:24px}.wrap{max-width:1000px;margin:auto}.card{background:#1f2937;border:1px solid #374151;border-radius:16px;padding:20px;margin:14px 0}.row{display:grid;grid-template-columns:220px 1fr 80px;gap:14px;align-items:center;margin:14px 0}.btrow{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:12px}.field label{display:block;color:#9ca3af;font-size:13px;margin-bottom:6px}input[type=range]{width:100%}input[type=number],input[type=date]{width:100%;background:#111827;color:#fff;border:1px solid #4b5563;border-radius:8px;padding:9px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:11px 18px;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.ok{color:#4ade80}.bad{color:#fb7185}.warn{color:#fbbf24}.muted{color:#9ca3af}code{color:#93c5fd}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:16px}.metric{background:#111827;border:1px solid #374151;border-radius:12px;padding:12px}.metric b{display:block;font-size:22px;margin-top:4px}.tablewrap{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse;min-width:780px}th,td{padding:9px;border-bottom:1px solid #374151;text-align:left;font-size:13px}th{color:#9ca3af}.pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#374151}@media(max-width:760px){body{padding:12px}.row{grid-template-columns:1fr}.btrow,.metrics{grid-template-columns:1fr 1fr}}@media(max-width:460px){.btrow,.metrics{grid-template-columns:1fr}}
+:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#111827;color:#e5e7eb;margin:0;padding:24px}.wrap{max-width:1000px;margin:auto}.card{background:#1f2937;border:1px solid #374151;border-radius:16px;padding:20px;margin:14px 0}.row{display:grid;grid-template-columns:220px 1fr 80px;gap:14px;align-items:center;margin:14px 0}.btrow{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:12px}.field label{display:block;color:#9ca3af;font-size:13px;margin-bottom:6px}input[type=range]{width:100%}input[type=number],input[type=date]{width:100%;background:#111827;color:#fff;border:1px solid #4b5563;border-radius:8px;padding:9px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:11px 18px;font-weight:700;cursor:pointer}button.recommended{background:#0f766e}button:disabled{opacity:.5;cursor:not-allowed}.ok{color:#4ade80}.bad{color:#fb7185}.warn{color:#fbbf24}.muted{color:#9ca3af}code{color:#93c5fd}.metrics{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-top:16px}.metric{background:#111827;border:1px solid #374151;border-radius:12px;padding:12px}.metric b{display:block;font-size:22px;margin-top:4px}.tablewrap{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse;min-width:780px}th,td{padding:9px;border-bottom:1px solid #374151;text-align:left;font-size:13px}th{color:#9ca3af}.pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#374151}@media(max-width:760px){body{padding:12px}.row{grid-template-columns:1fr}.btrow,.metrics{grid-template-columns:1fr 1fr}}@media(max-width:460px){.btrow,.metrics{grid-template-columns:1fr}}
 </style>
 </head>
 <body><div class="wrap">
@@ -130,6 +161,13 @@ def control_panel() -> str:
 <div class="card" id="factors"></div>
 <div class="card"><h2>Decision gates</h2><div class="row"><label>Minimum passed factors</label><input id="min_pass_count" type="range" min="1" max="6"><input id="min_pass_count_n" type="number" min="1" max="6"></div><div class="row"><label>Minimum total score</label><input id="min_total_score" type="range" min="0" max="100"><input id="min_total_score_n" type="number" min="0" max="100"></div><div class="row"><label>Minimum BUY/SELL edge</label><input id="min_side_edge" type="range" min="0" max="100"><input id="min_side_edge_n" type="number" min="0" max="100"></div></div>
 <button id="saveBtn">Save live thresholds</button> <span id="status"></span>
+
+<div class="card">
+<h2>Model-recommended profile</h2>
+<p id="recommendInfo" class="muted">Checking recommendation…</p>
+<p><button id="recommendBtn" class="recommended">Apply model-recommended settings</button> <span id="recommendStatus"></span></p>
+<p class="muted">This resets manual slider edits to our canonical model profile. Once enough closed forward trades exist, evidence-backed learned threshold changes are layered on top. It never raises risk automatically. Our income target can be tracked separately as a KPI; it is not a guaranteed return.</p>
+</div>
 
 <div class="card">
 <h2>Historical day replay</h2>
@@ -143,15 +181,18 @@ def control_panel() -> str:
 <p><button id="runBt" disabled>Run selected day</button> <span id="btMsg" class="muted"></span></p>
 <div id="btResult"></div>
 </div>
-<p class="muted">Live performance: <code>/performance</code> • Learning candidate: <code>/learning/recommendation</code> • History: <code>/history/status</code></p>
+<p class="muted">Live performance: <code>/performance</code> • Model profile: <code>/strategy/recommended</code> • Learning candidate: <code>/learning/recommendation</code> • History: <code>/history/status</code></p>
 </div>
 <script>
 const factorNames=['dynamic_levels','static_levels','fibonacci','patterns','pivots','divergence'];let cfg;
 function bind(id,obj,key){const r=document.getElementById(id),n=document.getElementById(id+'_n');r.value=obj[key];n.value=obj[key];r.addEventListener('input',()=>n.value=r.value);n.addEventListener('input',()=>r.value=n.value);}
-async function load(){cfg=await(await fetch('/strategy/config')).json();const box=document.getElementById('factors');box.innerHTML='<h2>Factor minimums</h2>';for(const name of factorNames){box.insertAdjacentHTML('beforeend',`<div class="row"><label>${name.replaceAll('_',' ')}</label><input id="${name}" type="range" min="0" max="100" step="1"><input id="${name}_n" type="number" min="0" max="100" step="1"></div>`);bind(name,cfg[name],'min_score');}bind('min_pass_count',cfg.decision,'min_pass_count');bind('min_total_score',cfg.decision,'min_total_score');bind('min_side_edge',cfg.decision,'min_side_edge');await loadHistory();}
-async function save(){for(const name of factorNames)cfg[name].min_score=Number(document.getElementById(name).value);cfg.decision.min_pass_count=Number(document.getElementById('min_pass_count').value);cfg.decision.min_total_score=Number(document.getElementById('min_total_score').value);cfg.decision.min_side_edge=Number(document.getElementById('min_side_edge').value);const res=await fetch('/strategy/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});const st=document.getElementById('status');if(res.ok){st.textContent='Saved';st.className='ok';}else{st.textContent='Save failed';st.className='bad';}}
+function setConfigInputs(config){for(const name of factorNames){document.getElementById(name).value=config[name].min_score;document.getElementById(name+'_n').value=config[name].min_score;}for(const id of ['min_pass_count','min_total_score','min_side_edge']){document.getElementById(id).value=config.decision[id];document.getElementById(id+'_n').value=config.decision[id];}}
+async function load(){cfg=await(await fetch('/strategy/config')).json();const box=document.getElementById('factors');box.innerHTML='<h2>Factor minimums</h2>';for(const name of factorNames){box.insertAdjacentHTML('beforeend',`<div class="row"><label>${name.replaceAll('_',' ')}</label><input id="${name}" type="range" min="0" max="100" step="1"><input id="${name}_n" type="number" min="0" max="100" step="1"></div>`);bind(name,cfg[name],'min_score');}bind('min_pass_count',cfg.decision,'min_pass_count');bind('min_total_score',cfg.decision,'min_total_score');bind('min_side_edge',cfg.decision,'min_side_edge');await Promise.all([loadHistory(),loadRecommendation()]);}
+async function save(){for(const name of factorNames)cfg[name].min_score=Number(document.getElementById(name).value);cfg.decision.min_pass_count=Number(document.getElementById('min_pass_count').value);cfg.decision.min_total_score=Number(document.getElementById('min_total_score').value);cfg.decision.min_side_edge=Number(document.getElementById('min_side_edge').value);const res=await fetch('/strategy/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});const st=document.getElementById('status');if(res.ok){cfg=await res.json();st.textContent='Saved';st.className='ok';}else{st.textContent='Save failed';st.className='bad';}}
+async function loadRecommendation(){const el=document.getElementById('recommendInfo');try{const r=await(await fetch('/strategy/recommended')).json();const source=r.source==='LEARNED_OVERLAY'?'learned overlay':'canonical baseline';const extra=r.learning_status==='INSUFFICIENT_DATA'?` • ${r.sample_size}/30 closed forward trades collected`:` • ${r.sample_size} closed forward trades`;el.textContent=`Recommended source: ${source}${extra}. ${r.reasons.join(' ')}`;el.className=r.source==='LEARNED_OVERLAY'?'ok':'muted';}catch(e){el.textContent='Could not read recommendation: '+e;el.className='bad';}}
+async function applyRecommended(){const btn=document.getElementById('recommendBtn'),st=document.getElementById('recommendStatus');btn.disabled=true;st.textContent='Applying…';st.className='muted';try{const res=await fetch('/strategy/apply-recommended',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||'Apply failed');cfg=data;setConfigInputs(cfg);st.textContent='Applied to live strategy';st.className='ok';document.getElementById('status').textContent='';await loadRecommendation();}catch(e){st.textContent=e.message;st.className='bad';}finally{btn.disabled=false;}}
 async function loadHistory(){const el=document.getElementById('historyStatus'),btn=document.getElementById('runBt'),date=document.getElementById('btDate');try{const h=await(await fetch('/history/status?symbol=XAUUSD_o&timeframe=M15')).json();if(!h.bars){el.textContent='No history synced yet. Update/recompile the EA and leave it attached for the first sync.';el.className='warn';return;}el.textContent=`Synced ${h.bars} bars • available ${h.earliest_date} → ${h.latest_date}`;el.className='ok';date.min=h.earliest_date;date.max=h.latest_date;date.value=h.latest_date;btn.disabled=false;}catch(e){el.textContent='Could not read history status: '+e;el.className='bad';}}
 function fmtTime(epoch){return new Date(epoch*1000).toISOString().replace('T',' ').slice(0,16);}
 async function runBacktest(){const btn=document.getElementById('runBt'),msg=document.getElementById('btMsg'),out=document.getElementById('btResult');const date=document.getElementById('btDate').value,balance=Number(document.getElementById('btBalance').value),risk=Number(document.getElementById('btRisk').value),rr=Number(document.getElementById('btRR').value);if(!date||balance<=0||risk<=0||rr<=0){msg.textContent='Check date/balance/risk/RR.';msg.className='bad';return;}btn.disabled=true;msg.textContent='Replaying completed M15 bars…';msg.className='muted';out.innerHTML='';const qs=new URLSearchParams({date,symbol:'XAUUSD_o',timeframe:'M15',starting_balance:String(balance),risk_percent:String(risk),reward_risk_ratio:String(rr)});try{const res=await fetch('/backtest?'+qs.toString());const data=await res.json();if(!res.ok)throw new Error(data.detail||'Backtest failed');msg.textContent='Done';msg.className='ok';const pnlClass=data.estimated_pnl_money>=0?'ok':'bad';const rows=data.trades_detail.map((t,i)=>`<tr><td>${i+1}</td><td>${t.side}</td><td>${fmtTime(t.entry_time)}</td><td>${t.outcome}</td><td>${t.r_multiple.toFixed(2)}R</td><td class="${t.pnl_money>=0?'ok':'bad'}">$${t.pnl_money.toFixed(2)}</td><td>${t.passed_count}/6</td></tr>`).join('');out.innerHTML=`<div class="metrics"><div class="metric"><span class="muted">Trades</span><b>${data.trades}</b><small>BUY ${data.buy_trades} • SELL ${data.sell_trades}</small></div><div class="metric"><span class="muted">Win rate</span><b>${data.win_rate.toFixed(1)}%</b><small>${data.wins}W / ${data.losses}L</small></div><div class="metric"><span class="muted">Net R</span><b>${data.net_r.toFixed(2)}R</b><small>E ${data.expectancy_r.toFixed(2)}R/trade</small></div><div class="metric"><span class="muted">Estimated P/L</span><b class="${pnlClass}">$${data.estimated_pnl_money.toFixed(2)}</b><small>$${data.starting_balance.toFixed(2)} → $${data.ending_balance.toFixed(2)}</small></div></div><p class="muted">Signals: ${data.signals} (BUY ${data.buy_signals}, SELL ${data.sell_signals}) • Max DD ${data.max_drawdown_r.toFixed(2)}R • ${data.note}</p><div class="tablewrap"><table><thead><tr><th>#</th><th>Side</th><th>Entry</th><th>Exit</th><th>Result</th><th>P/L</th><th>Passed</th></tr></thead><tbody>${rows||'<tr><td colspan="7">No trades for this date with current thresholds.</td></tr>'}</tbody></table></div>`;}catch(e){msg.textContent=e.message;msg.className='bad';}finally{btn.disabled=false;}}
-document.getElementById('saveBtn').addEventListener('click',save);document.getElementById('runBt').addEventListener('click',runBacktest);load();
+document.getElementById('saveBtn').addEventListener('click',save);document.getElementById('recommendBtn').addEventListener('click',applyRecommended);document.getElementById('runBt').addEventListener('click',runBacktest);load();
 </script></body></html>'''
