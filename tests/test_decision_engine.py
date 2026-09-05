@@ -1,5 +1,5 @@
 from meta_trader_ai.decision_engine import build_decision
-from meta_trader_ai.models import Bar, DailyContext, MarketSnapshot, StrategyConfig
+from meta_trader_ai.models import Bar, DailyContext, MarketSnapshot, SignalOverlay, StrategyConfig
 
 
 def snapshot(up: bool = True) -> MarketSnapshot:
@@ -22,6 +22,9 @@ def test_decision_is_explainable() -> None:
     assert {f.name.value for f in response.factors} == {"dynamic_levels", "static_levels", "fibonacci", "patterns", "pivots", "divergence"}
     assert response.buy_score >= 0
     assert response.sell_score >= 0
+    assert response.overlays == []
+    assert response.overlay_buy_modifier == 0
+    assert response.overlay_sell_modifier == 0
     assert len(response.safety) >= 4
     regime_gate = next(g for g in response.safety if g.name == "market_regime")
     assert regime_gate.passed is True
@@ -36,6 +39,39 @@ def test_decision_exposes_bridge_live_risk_and_reward_ratio() -> None:
 
     assert response.risk_percent == 0.35
     assert response.reward_risk_ratio == 2.5
+
+
+def test_live_overlay_modifies_total_score_but_keeps_base_score_visible() -> None:
+    s = snapshot()
+    baseline = build_decision(s, StrategyConfig())
+    overlay = SignalOverlay(
+        source="cot",
+        available=True,
+        buy_modifier=3.0,
+        sell_modifier=0.0,
+        reason="test macro bias",
+    )
+    response = build_decision(s, StrategyConfig(), overlays=[overlay])
+
+    assert response.base_buy_score == baseline.buy_score
+    assert response.base_sell_score == baseline.sell_score
+    assert response.overlay_buy_modifier == 3.0
+    assert response.overlay_sell_modifier == 0.0
+    assert response.buy_score == min(100.0, baseline.buy_score + 3.0)
+    assert response.overlays[0].source == "cot"
+
+
+def test_unavailable_overlay_is_fail_open() -> None:
+    s = snapshot()
+    baseline = build_decision(s, StrategyConfig())
+    response = build_decision(
+        s,
+        StrategyConfig(),
+        overlays=[SignalOverlay(source="myfxbook", available=False, reason="offline")],
+    )
+
+    assert response.buy_score == baseline.buy_score
+    assert response.sell_score == baseline.sell_score
 
 
 def test_edge_gate_keeps_leading_candidate_explainable() -> None:
