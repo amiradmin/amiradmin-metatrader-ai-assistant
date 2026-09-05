@@ -25,6 +25,13 @@ class ReplaySettings:
     min_stop_points: int = 150
     max_stop_points: int = 1200
     lookback_bars: int = 120
+    max_open_trades: int = 1
+
+
+@dataclass
+class _PendingTrade:
+    exit_index: int
+    trade: BacktestTrade
 
 
 def _previous_day_context(history: list[HistoryBar], selected_date: str) -> DailyContext | None:
@@ -113,6 +120,9 @@ def run_date_backtest(
     config: StrategyConfig,
     settings: ReplaySettings,
 ) -> BacktestSummary:
+    if not 1 <= settings.max_open_trades <= 5:
+        raise ValueError("max_open_trades must be between 1 and 5")
+
     bars = sorted(history, key=lambda bar: bar.time)
     day_indices = [i for i, bar in enumerate(bars) if bar.broker_date == selected_date]
     if not day_indices:
@@ -124,21 +134,31 @@ def run_date_backtest(
 
     balance = settings.starting_balance
     start_balance = balance
-    cumulative_r = 0.0
-    peak_r = 0.0
-    max_drawdown_r = 0.0
-    trades: list[BacktestTrade] = []
+    open_trades: list[_PendingTrade] = []
+    closed_trades: list[BacktestTrade] = []
     evaluated = 0
     buy_signals = 0
     sell_signals = 0
     signal_count = 0
-    blocked_until = first_day_index - 1
 
-    i = first_day_index
-    while i <= last_day_index:
+    def settle_through(index: int) -> None:
+        nonlocal balance, open_trades
+        due = sorted((p for p in open_trades if p.exit_index <= index), key=lambda p: (p.exit_index, p.trade.entry_time))
+        if not due:
+            return
+        due_ids = {id(p) for p in due}
+        open_trades = [p for p in open_trades if id(p) not in due_ids]
+        for pending in due:
+            balance += pending.trade.pnl_money
+            closed_trades.append(pending.trade)
+
+    for i in range(first_day_index, last_day_index + 1):
+        # Anything that finished during this completed bar is known closed before
+        # the next-bar entry decision is made.
+        settle_through(i)
+
         snap = _snapshot(bars, i, point, previous_day)
         if snap is None:
-            i += 1
             continue
         snap.symbol = symbol
         snap.timeframe = timeframe
@@ -151,11 +171,12 @@ def run_date_backtest(
             sell_signals += 1
             signal_count += 1
 
-        if i <= blocked_until or not decision.trade_allowed or decision.decision not in (Decision.BUY, Decision.SELL):
-            i += 1
+        if not decision.trade_allowed or decision.decision not in (Decision.BUY, Decision.SELL):
+            continue
+        if len(open_trades) >= settings.max_open_trades:
             continue
         if i + 1 > last_day_index:
-            break
+            continue
 
         side = decision.decision.value
         entry_index = i + 1
@@ -182,33 +203,40 @@ def run_date_backtest(
         exit_index, exit_price, outcome, r_multiple = _trade_exit(
             bars, entry_index, last_day_index, side, entry, stop, target, point
         )
+        # Risk is fixed when a trade is opened. With overlapping trades we use
+        # realized balance, not unrealized equity, which keeps the replay
+        # deterministic and slightly conservative relative to the live EA.
         risk_money = balance * settings.risk_percent / 100.0
         pnl_money = risk_money * r_multiple
-        balance += pnl_money
-        cumulative_r += r_multiple
+        trade = BacktestTrade(
+            signal_time=bars[i].time,
+            entry_time=entry_bar.time,
+            exit_time=bars[exit_index].time,
+            side=side,
+            entry=round(entry, 6),
+            stop=round(stop, 6),
+            target=round(target, 6),
+            exit=round(exit_price, 6),
+            outcome=outcome,
+            r_multiple=round(r_multiple, 4),
+            pnl_money=round(pnl_money, 2),
+            buy_score=decision.buy_score,
+            sell_score=decision.sell_score,
+            passed_count=decision.passed_count,
+        )
+        open_trades.append(_PendingTrade(exit_index=exit_index, trade=trade))
+
+    settle_through(last_day_index)
+    trades = sorted(closed_trades, key=lambda t: (t.entry_time, t.exit_time))
+    exit_order = sorted(closed_trades, key=lambda t: (t.exit_time, t.entry_time))
+
+    cumulative_r = 0.0
+    peak_r = 0.0
+    max_drawdown_r = 0.0
+    for trade in exit_order:
+        cumulative_r += trade.r_multiple
         peak_r = max(peak_r, cumulative_r)
         max_drawdown_r = max(max_drawdown_r, peak_r - cumulative_r)
-
-        trades.append(
-            BacktestTrade(
-                signal_time=bars[i].time,
-                entry_time=entry_bar.time,
-                exit_time=bars[exit_index].time,
-                side=side,
-                entry=round(entry, 6),
-                stop=round(stop, 6),
-                target=round(target, 6),
-                exit=round(exit_price, 6),
-                outcome=outcome,
-                r_multiple=round(r_multiple, 4),
-                pnl_money=round(pnl_money, 2),
-                buy_score=decision.buy_score,
-                sell_score=decision.sell_score,
-                passed_count=decision.passed_count,
-            )
-        )
-        blocked_until = exit_index
-        i = max(i + 1, exit_index + 1)
 
     r_values = [trade.r_multiple for trade in trades]
     wins = sum(1 for value in r_values if value > 0)
@@ -243,5 +271,6 @@ def run_date_backtest(
         ending_balance=round(balance, 2),
         risk_percent=settings.risk_percent,
         reward_risk_ratio=settings.reward_risk_ratio,
+        max_open_trades=settings.max_open_trades,
         trades_detail=trades,
     )
