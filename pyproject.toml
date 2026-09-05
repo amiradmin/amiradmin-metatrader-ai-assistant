@@ -1,6 +1,6 @@
 [project]
 name = "amiradmin-metatrader-ai-assistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "Explainable six-factor MetaTrader 5 decision engine with bridge-configurable thresholds and forward performance tracking"
 requires-python = ">=3.11"
 dependencies = [
