@@ -71,12 +71,12 @@ def test_market_regime_filter_can_block_entry() -> None:
     config.decision.min_total_score = 0
     config.decision.min_side_edge = 0
     config.safety.regime_filter_enabled = True
-    config.safety.regime_min_trend_atr = 5.0
-    config.safety.regime_min_atr_ratio = 0.1
+    config.safety.regime_min_trend_atr = 0.0
+    config.safety.regime_min_atr_ratio = 5.0
 
     response = build_decision(snapshot(), config)
     regime_gate = next(g for g in response.safety if g.name == "market_regime")
 
     assert regime_gate.passed is False
     assert response.trade_allowed is False
-    assert any("regime trend=" in blocker for blocker in response.blockers)
+    assert any("ATR ratio=" in blocker for blocker in response.blockers)
