@@ -60,6 +60,28 @@ def test_control_page_has_regime_filter_research_preset() -> None:
     assert "setBound('regime_min_atr_ratio',0.90)" in html
 
 
+def test_control_page_has_ninja_aggressive_demo_preset() -> None:
+    html = control_page_html()
+
+    assert 'id="ninjaPresetBtn"' in html
+    assert "Ninja · Aggressive DEMO" in html
+    assert "function setNinjaPreset()" in html
+    assert "function applyNinjaPreset()" in html
+    assert "dynamic_levels:50" in html
+    assert "static_levels:45" in html
+    assert "fibonacci:40" in html
+    assert "patterns:40" in html
+    assert "pivots:35" in html
+    assert "divergence:35" in html
+    assert "setBound('min_total_score',40)" in html
+    assert "setBound('min_side_edge',4)" in html
+    assert "setBound('max_open_trades',3)" in html
+    assert "setBound('risk_percent',2.0)" in html
+    assert "setBound('reward_risk_ratio',2.5)" in html
+    assert "cfg.safety.demo_only=true" in html
+    assert "regime unchanged" in html
+
+
 def test_training_page_has_tooltips_and_cross_period_stability() -> None:
     html = training_page_html()
 
