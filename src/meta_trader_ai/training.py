@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from math import sqrt
 from random import Random
 from statistics import pstdev
 from typing import Literal
@@ -19,6 +18,7 @@ class TrainingRequest(BaseModel):
     starting_balance: float = Field(1000.0, gt=0, le=100_000_000)
     risk_percent: float = Field(0.5, gt=0, le=5.0)
     reward_risk_ratio: float = Field(2.0, ge=0.5, le=10.0)
+    max_open_trades: int = Field(1, ge=1, le=5)
     iterations: int = Field(24, ge=8, le=80)
     base_profile: Literal["MODEL_BASELINE", "CURRENT"] = "MODEL_BASELINE"
     target_daily_pnl: float = Field(10.0, ge=0, le=100_000)
@@ -40,16 +40,13 @@ def _range_metrics(
     starting_balance: float,
     risk_percent: float,
     reward_risk_ratio: float,
+    max_open_trades: int,
 ) -> dict[str, float | int]:
     balance = starting_balance
     all_r: list[float] = []
     daily_r: list[float] = []
     daily_pnl: list[float] = []
-    wins = 0
-    losses = 0
-    signals = 0
-    buy_trades = 0
-    sell_trades = 0
+    wins = losses = signals = buy_trades = sell_trades = 0
 
     for selected_date in dates:
         summary = run_date_backtest(
@@ -63,6 +60,7 @@ def _range_metrics(
                 starting_balance=balance,
                 risk_percent=risk_percent,
                 reward_risk_ratio=reward_risk_ratio,
+                max_open_trades=max_open_trades,
             ),
         )
         balance = summary.ending_balance
@@ -75,9 +73,7 @@ def _range_metrics(
         daily_pnl.append(summary.estimated_pnl_money)
         all_r.extend(trade.r_multiple for trade in summary.trades_detail)
 
-    cumulative = 0.0
-    peak = 0.0
-    max_drawdown_r = 0.0
+    cumulative = peak = max_drawdown_r = 0.0
     for value in all_r:
         cumulative += value
         peak = max(peak, cumulative)
@@ -94,10 +90,6 @@ def _range_metrics(
     win_rate = wins / trades * 100.0 if trades else 0.0
     profitable_days_percent = profitable_days / trading_days * 100.0 if trading_days else 0.0
 
-    # Training objective deliberately uses R-based quality and drawdown rather
-    # than dollar profit, so the optimizer cannot "win" merely by raising risk.
-    # Sparse strategies are penalized because a one-trade lucky sample is not
-    # enough evidence to promote a threshold profile.
     sample_target = max(8, trading_days // 2)
     sample_factor = min(1.0, trades / sample_target) if sample_target else 0.0
     if trades == 0:
@@ -154,14 +146,10 @@ def _candidate(base: StrategyConfig, rng: Random, index: int) -> StrategyConfig:
 
     candidate.decision.min_pass_count = rng.choice((2, 3, 3, 3, 4))
     candidate.decision.min_total_score = _clamp(
-        base.decision.min_total_score + rng.choice((-10.0, -5.0, 0.0, 0.0, 5.0, 10.0)),
-        38.0,
-        65.0,
+        base.decision.min_total_score + rng.choice((-10.0, -5.0, 0.0, 0.0, 5.0, 10.0)), 38.0, 65.0
     )
     candidate.decision.min_side_edge = _clamp(
-        base.decision.min_side_edge + rng.choice((-4.0, -2.0, 0.0, 0.0, 2.0, 4.0)),
-        5.0,
-        16.0,
+        base.decision.min_side_edge + rng.choice((-4.0, -2.0, 0.0, 0.0, 2.0, 4.0)), 5.0, 16.0
     )
     return candidate
 
@@ -176,27 +164,15 @@ def _config_summary(config: StrategyConfig) -> dict[str, float | int | bool]:
 
 
 def train_thresholds(
-    *,
-    history: list[HistoryBar],
-    point: float,
-    request: TrainingRequest,
-    base_config: StrategyConfig,
+    *, history: list[HistoryBar], point: float, request: TrainingRequest, base_config: StrategyConfig
 ) -> dict[str, object]:
     if request.start_date > request.end_date:
         raise ValueError("start_date must be <= end_date")
 
-    dates = sorted(
-        {
-            bar.broker_date
-            for bar in history
-            if request.start_date <= bar.broker_date <= request.end_date
-        }
-    )
+    dates = sorted({bar.broker_date for bar in history if request.start_date <= bar.broker_date <= request.end_date})
     if len(dates) < 15:
         raise ValueError("Training needs at least 15 synced trading days so train/validation/holdout are meaningful.")
 
-    # Chronological 60/20/20 split. The holdout segment is never used to choose
-    # thresholds; it is only opened after the candidate has been selected.
     train_end = max(1, int(len(dates) * 0.60))
     validation_end = max(train_end + 1, int(len(dates) * 0.80))
     validation_end = min(validation_end, len(dates) - 1)
@@ -214,6 +190,7 @@ def train_thresholds(
         "starting_balance": request.starting_balance,
         "risk_percent": request.risk_percent,
         "reward_risk_ratio": request.reward_risk_ratio,
+        "max_open_trades": request.max_open_trades,
     }
 
     baseline_train = _range_metrics(dates=train_dates, config=base_config, **kwargs)
@@ -223,7 +200,6 @@ def train_thresholds(
     rng = Random(request.seed)
     train_ranked: list[tuple[float, int, StrategyConfig, dict[str, float | int]]] = []
     seen: set[tuple[object, ...]] = set()
-
     for index in range(request.iterations):
         config = _candidate(base_config, rng, index)
         key = tuple(_config_summary(config).values())
@@ -240,16 +216,14 @@ def train_thresholds(
     finalists: list[dict[str, object]] = []
     for train_score, index, config, train_metrics in train_ranked[: min(6, len(train_ranked))]:
         validation_metrics = _range_metrics(dates=validation_dates, config=config, **kwargs)
-        finalists.append(
-            {
-                "index": index,
-                "config": config,
-                "train": train_metrics,
-                "validation": validation_metrics,
-                "selection_score": float(validation_metrics["objective"]),
-                "train_score": train_score,
-            }
-        )
+        finalists.append({
+            "index": index,
+            "config": config,
+            "train": train_metrics,
+            "validation": validation_metrics,
+            "selection_score": float(validation_metrics["objective"]),
+            "train_score": train_score,
+        })
 
     finalists.sort(key=lambda row: float(row["selection_score"]), reverse=True)
     winner = finalists[0]
@@ -272,20 +246,19 @@ def train_thresholds(
     for row in finalists[:5]:
         cfg = row["config"]
         assert isinstance(cfg, StrategyConfig)
-        top_candidates.append(
-            {
-                "index": row["index"],
-                "config": _config_summary(cfg),
-                "train": row["train"],
-                "validation": row["validation"],
-            }
-        )
+        top_candidates.append({
+            "index": row["index"],
+            "config": _config_summary(cfg),
+            "train": row["train"],
+            "validation": row["validation"],
+        })
 
     return {
         "status": "PROMISING" if promising else "NEEDS_MORE_WORK",
         "method": "chronological walk-forward threshold search",
         "warning": "Historical optimization can overfit. A candidate must still prove itself in DEMO/forward trading before real-money use.",
         "target_daily_pnl": request.target_daily_pnl,
+        "max_open_trades": request.max_open_trades,
         "base_profile": request.base_profile,
         "iterations_requested": request.iterations,
         "candidates_evaluated": len(train_ranked),
