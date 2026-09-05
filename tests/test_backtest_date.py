@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from meta_trader_ai.backtest_date import ReplaySettings, run_date_backtest
@@ -56,6 +57,64 @@ def test_history_store_merges_by_timestamp(tmp_path) -> None:
     assert status.bars == len(bars)
     assert status.earliest_date == "2026-09-02"
     assert status.latest_date == "2026-09-04"
+
+
+def test_history_store_default_supports_multi_year_bar_counts(tmp_path) -> None:
+    store = HistoryStore(root=tmp_path)
+    assert store.max_bars >= 100_000
+
+
+def test_history_store_prunes_oldest_only_when_cap_is_reached(tmp_path) -> None:
+    store = HistoryStore(root=tmp_path, max_bars=10)
+    bars = make_history()[:12]
+    store.save(HistorySync(symbol="XAUUSD_o", timeframe="M15", point=0.01, bars=bars))
+    loaded = store.load("XAUUSD_o", "M15")
+    assert len(loaded) == 10
+    assert loaded[0].time == bars[2].time
+    assert loaded[-1].time == bars[-1].time
+
+
+def test_history_store_migrates_legacy_json_without_losing_bars(tmp_path) -> None:
+    bars = make_history()[:8]
+    legacy = tmp_path / "XAUUSD_o_M15.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "symbol": "XAUUSD_o",
+                "timeframe": "M15",
+                "point": 0.01,
+                "bars": [bar.model_dump(mode="json") for bar in bars],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = HistoryStore(root=tmp_path)
+    status = store.status("XAUUSD_o", "M15")
+
+    assert status.bars == len(bars)
+    assert store.point("XAUUSD_o", "M15") == 0.01
+    assert not legacy.exists()
+    assert (tmp_path / "XAUUSD_o_M15.json.migrated").exists()
+
+
+def test_load_range_includes_indicator_preroll(tmp_path) -> None:
+    store = HistoryStore(root=tmp_path)
+    bars = make_history()
+    store.save(HistorySync(symbol="XAUUSD_o", timeframe="M15", point=0.01, bars=bars))
+
+    loaded = store.load_range(
+        "XAUUSD_o",
+        "M15",
+        "2026-09-03",
+        "2026-09-03",
+        lookback_bars=20,
+    )
+
+    selected = [bar for bar in loaded if bar.broker_date == "2026-09-03"]
+    preroll = [bar for bar in loaded if bar.broker_date < "2026-09-03"]
+    assert selected
+    assert len(preroll) == 20
 
 
 def test_date_backtest_returns_trade_summary() -> None:
