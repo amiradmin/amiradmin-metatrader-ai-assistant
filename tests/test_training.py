@@ -46,14 +46,17 @@ def fake_metrics(*, dates, config, starting_balance, **kwargs):
         "win_rate": 100.0,
         "net_r": expectancy * trades,
         "expectancy_r": expectancy,
+        "profit_factor": 1.25 if expectancy > 0 else 0.8,
         "avg_daily_r": expectancy,
         "max_drawdown_r": 0.5,
+        "max_drawdown_percent": 5.0,
         "daily_r_std": 0.1,
         "profitable_days": len(dates),
         "profitable_days_percent": 100.0,
         "starting_balance": starting_balance,
         "ending_balance": starting_balance + pnl,
         "total_pnl": pnl,
+        "total_return_percent": pnl / starting_balance * 100.0,
         "avg_daily_pnl": pnl / len(dates),
         "objective": objective,
     }
@@ -78,10 +81,22 @@ def test_training_uses_chronological_60_20_20_split_and_preserves_safety(monkeyp
     assert candidate.safety == base.safety
     assert candidate.dynamic_levels.weight == base.dynamic_levels.weight
     assert result["candidates_evaluated"] >= 1
+    assert result["method"] == "continuous chronological walk-forward + cross-period stability"
+    assert result["stability"]["window_count"] == 2
+    assert result["stability"]["positive_windows"] == 2
 
 
 def test_training_requires_enough_trading_days() -> None:
     history = make_days(10)
-    request = TrainingRequest(start_date=history[0].broker_date, end_date=history[-1].broker_date, iterations=8)
+    request = TrainingRequest(
+        start_date=history[0].broker_date,
+        end_date=history[-1].broker_date,
+        iterations=8,
+    )
     with pytest.raises(ValueError, match="at least 15"):
-        train_thresholds(history=history, point=0.01, request=request, base_config=StrategyConfig())
+        train_thresholds(
+            history=history,
+            point=0.01,
+            request=request,
+            base_config=StrategyConfig(),
+        )
