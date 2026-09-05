@@ -1,6 +1,6 @@
 #property strict
-#property version   "0.10"
-#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution"
+#property version   "0.20"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution and historical replay sync"
 
 #include <Trade/Trade.mqh>
 
@@ -10,6 +10,8 @@ input ENUM_TIMEFRAMES AnalysisTimeframe = PERIOD_M15;
 input int SnapshotBars = 120;
 input int SignalSeconds = 15;
 input int RequestTimeoutMs = 10000;
+input int HistorySyncBars = 5000;
+input int HistorySyncSeconds = 600;
 
 input bool EnableAutoTrading = true;
 input bool DemoOnly = true;
@@ -32,6 +34,7 @@ input int PanelFontSize = 12;
 CTrade Trade;
 int AtrHandle = INVALID_HANDLE;
 ulong LastSignalCheckMs = 0;
+ulong LastHistorySyncMs = 0;
 string LastExecutedSignalId = "";
 datetime LastExecutedBarTime = 0;
 string ActiveSignalId = "";
@@ -58,6 +61,51 @@ string TfText()
    if(AnalysisTimeframe == PERIOD_M5) return "M5";
    if(AnalysisTimeframe == PERIOD_H1) return "H1";
    return EnumToString(AnalysisTimeframe);
+}
+
+string BrokerDate(const datetime value)
+{
+   MqlDateTime parts;
+   TimeToStruct(value, parts);
+   return StringFormat("%04d-%02d-%02d", parts.year, parts.mon, parts.day);
+}
+
+bool MarketSessionOpenNow()
+{
+   datetime now = TimeTradeServer();
+   if(now <= 0) now = TimeCurrent();
+   if(now <= 0) return false;
+
+   MqlDateTime now_parts;
+   TimeToStruct(now, now_parts);
+   ENUM_DAY_OF_WEEK day = (ENUM_DAY_OF_WEEK)now_parts.day_of_week;
+   int now_seconds = now_parts.hour * 3600 + now_parts.min * 60 + now_parts.sec;
+
+   datetime from = 0;
+   datetime to = 0;
+   for(uint session = 0; session < 20; session++)
+   {
+      if(!SymbolInfoSessionTrade(TradeSymbol, day, session, from, to))
+         break;
+      MqlDateTime from_parts, to_parts;
+      TimeToStruct(from, from_parts);
+      TimeToStruct(to, to_parts);
+      int from_seconds = from_parts.hour * 3600 + from_parts.min * 60 + from_parts.sec;
+      int to_seconds = to_parts.hour * 3600 + to_parts.min * 60 + to_parts.sec;
+      if(from_seconds == to_seconds)
+         return true;
+      if(from_seconds < to_seconds)
+      {
+         if(now_seconds >= from_seconds && now_seconds < to_seconds)
+            return true;
+      }
+      else
+      {
+         if(now_seconds >= from_seconds || now_seconds < to_seconds)
+            return true;
+      }
+   }
+   return false;
 }
 
 string JsonEscape(string value)
@@ -198,6 +246,39 @@ bool BuildSnapshotJson(string &payload)
    return true;
 }
 
+bool BuildHistorySyncJson(string &payload)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int requested = MathMax(200, HistorySyncBars);
+   int copied = CopyRates(TradeSymbol, AnalysisTimeframe, 1, requested, rates);
+   if(copied < 60)
+      return false;
+
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+
+   payload = "{";
+   payload += "\"symbol\":\"" + JsonEscape(TradeSymbol) + "\",";
+   payload += "\"timeframe\":\"" + TfText() + "\",";
+   payload += "\"point\":" + DoubleToString(point,10) + ",";
+   payload += "\"bars\":[";
+   for(int i=copied-1; i>=0; i--)
+   {
+      payload += "{";
+      payload += "\"time\":" + IntegerToString((int)rates[i].time) + ",";
+      payload += "\"broker_date\":\"" + BrokerDate(rates[i].time) + "\",";
+      payload += "\"open\":" + DoubleToString(rates[i].open,_Digits) + ",";
+      payload += "\"high\":" + DoubleToString(rates[i].high,_Digits) + ",";
+      payload += "\"low\":" + DoubleToString(rates[i].low,_Digits) + ",";
+      payload += "\"close\":" + DoubleToString(rates[i].close,_Digits) + ",";
+      payload += "\"spread_points\":" + IntegerToString((int)rates[i].spread) + "}";
+      if(i > 0) payload += ",";
+   }
+   payload += "]}";
+   return true;
+}
+
 bool HttpPostJson(const string url, const string payload, string &response)
 {
    char data[];
@@ -220,6 +301,19 @@ bool HttpPostJson(const string url, const string payload, string &response)
       return false;
    }
    return true;
+}
+
+void SyncHistoryNow()
+{
+   string payload;
+   if(!BuildHistorySyncJson(payload))
+   {
+      Print("MetaTraderAI history sync: not enough M15 history yet.");
+      return;
+   }
+   string response;
+   if(HttpPostJson(BridgeBaseUrl+"/history/sync", payload, response))
+      Print("MetaTraderAI history synced to Bridge: ", response);
 }
 
 void EnsurePanelObject(const string name, const int x, const int y, const int font_size=12)
@@ -273,7 +367,12 @@ void DrawDecisionPanel(const string json)
    double sell_score = JsonNumber(json,"sell_score",0);
    int passed_count = (int)JsonNumber(json,"passed_count",0);
    int min_pass = (int)JsonNumber(json,"min_pass_count",4);
-   bool allowed = JsonBool(json,"trade_allowed",false);
+   bool bridge_allowed = JsonBool(json,"trade_allowed",false);
+   bool market_open = MarketSessionOpenNow();
+   bool algo_ready = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED);
+   bool demo_ready = !DemoOnly || AccountModeText() == "DEMO";
+   bool local_ready = market_open && algo_ready && demo_ready;
+   bool execution_ready = bridge_allowed && local_ready;
 
    color decision_color = decision == "BUY" ? clrLime : decision == "SELL" ? clrTomato : clrGold;
    SetPanelText("TITLE","META TRADER AI v2 | SIX-FACTOR DECISION TREE",14,12,clrWhite,PanelFontSize+1);
@@ -300,12 +399,37 @@ void DrawDecisionPanel(const string json)
                  "  trend="+JsonString(json,"trend","COLLECTING");
    SetPanelText("PERF",perf,14,320,clrAqua,PanelFontSize);
 
-   string status = allowed ? "EXECUTION: ARMED - signal may open a DEMO position" : "EXECUTION: BLOCKED / WAIT";
-   SetPanelText("EXEC",status,14,350,allowed ? clrLime : clrGold,PanelFontSize);
+   string status;
+   color status_color;
+   if(execution_ready)
+   {
+      status = "EXECUTION: ARMED - signal may open a DEMO position";
+      status_color = clrLime;
+   }
+   else if(bridge_allowed && !market_open)
+   {
+      status = "EXECUTION: BLOCKED - MARKET CLOSED";
+      status_color = clrTomato;
+   }
+   else if(bridge_allowed && !algo_ready)
+   {
+      status = "EXECUTION: BLOCKED - ALGO TRADING DISABLED";
+      status_color = clrTomato;
+   }
+   else
+   {
+      status = "EXECUTION: BLOCKED / WAIT";
+      status_color = clrGold;
+   }
+   SetPanelText("EXEC",status,14,350,status_color,PanelFontSize);
+
    string blocker=JsonString(json,"primary_blocker","");
-   SetPanelText("WHY",blocker=="" ? "WHY: all decision gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
-   SetPanelText("CFG","Thresholds are live from Bridge: /control or GET/PUT /strategy/config",14,400,clrSilver,PanelFontSize-1);
-   SetPanelText("SAFE","Local hard gate: DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,clrSilver,PanelFontSize-1);
+   if(bridge_allowed && !market_open) blocker="market closed for "+TradeSymbol;
+   else if(bridge_allowed && !algo_ready) blocker="Algo Trading is disabled in terminal or EA";
+   else if(bridge_allowed && !demo_ready) blocker="DemoOnly=true but account is not DEMO";
+   SetPanelText("WHY",blocker=="" ? "WHY: all decision + local execution gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
+   SetPanelText("CFG","Thresholds + date backtest: Bridge /control",14,400,clrSilver,PanelFontSize-1);
+   SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
    ChartRedraw();
 }
 
@@ -381,6 +505,7 @@ void MaybeExecute(const string json)
 {
    if(!EnableAutoTrading) return;
    if(DemoOnly && AccountModeText() != "DEMO") return;
+   if(!MarketSessionOpenNow()) return;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
    if(!JsonBool(json,"trade_allowed",false)) return;
    string side=JsonString(json,"decision","WAIT");
@@ -482,6 +607,13 @@ int OnInit()
 void OnTimer()
 {
    ulong now=GetTickCount64();
+
+   if(LastHistorySyncMs == 0 || now-LastHistorySyncMs >= (ulong)MathMax(60,HistorySyncSeconds)*1000)
+   {
+      LastHistorySyncMs=now;
+      SyncHistoryNow();
+   }
+
    if(now-LastSignalCheckMs < (ulong)MathMax(1,SignalSeconds)*1000) return;
    LastSignalCheckMs=now;
    AnalyzeNow();
