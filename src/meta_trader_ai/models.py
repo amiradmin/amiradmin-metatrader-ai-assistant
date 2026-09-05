@@ -155,3 +155,69 @@ class LearningRecommendation(BaseModel):
     current_expectancy_r: float
     proposed_thresholds: dict[str, float]
     reasons: list[str]
+
+
+class HistoryBar(Bar):
+    broker_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    spread_points: int = Field(0, ge=0)
+
+
+class HistorySync(BaseModel):
+    symbol: str
+    timeframe: str = "M15"
+    point: float = Field(gt=0)
+    bars: list[HistoryBar] = Field(min_length=1)
+
+
+class HistoryStatus(BaseModel):
+    symbol: str
+    timeframe: str
+    bars: int
+    earliest_date: str | None = None
+    latest_date: str | None = None
+    available_dates: list[str] = Field(default_factory=list)
+
+
+class BacktestTrade(BaseModel):
+    signal_time: int
+    entry_time: int
+    exit_time: int
+    side: Literal["BUY", "SELL"]
+    entry: float
+    stop: float
+    target: float
+    exit: float
+    outcome: Literal["TP", "SL", "DAY_CLOSE"]
+    r_multiple: float
+    pnl_money: float
+    buy_score: float
+    sell_score: float
+    passed_count: int
+
+
+class BacktestSummary(BaseModel):
+    date: str
+    symbol: str
+    timeframe: str
+    bars_available: int
+    evaluated_bars: int
+    signals: int
+    buy_signals: int
+    sell_signals: int
+    trades: int
+    buy_trades: int
+    sell_trades: int
+    wins: int
+    losses: int
+    flat: int
+    win_rate: float
+    expectancy_r: float
+    net_r: float
+    max_drawdown_r: float
+    estimated_pnl_money: float
+    starting_balance: float
+    ending_balance: float
+    risk_percent: float
+    reward_risk_ratio: float
+    trades_detail: list[BacktestTrade] = Field(default_factory=list)
+    note: str = "Signals are evaluated on completed M15 bars; entries use the next bar open. Any still-open trade is marked to market at the selected day's final bar close."
