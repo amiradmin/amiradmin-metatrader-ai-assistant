@@ -12,9 +12,15 @@ def test_recommended_profile_uses_canonical_baseline_without_samples(tmp_path) -
     assert source == "MODEL_BASELINE"
     assert learning.status == "INSUFFICIENT_DATA"
     assert config == StrategyConfig()
-    assert config.decision.min_pass_count == 4
-    assert config.decision.min_total_score == 68
-    assert config.decision.min_side_edge == 12
+    assert config.dynamic_levels.min_score == 60
+    assert config.static_levels.min_score == 50
+    assert config.fibonacci.min_score == 45
+    assert config.patterns.min_score == 45
+    assert config.pivots.min_score == 40
+    assert config.divergence.min_score == 40
+    assert config.decision.min_pass_count == 3
+    assert config.decision.min_total_score == 50
+    assert config.decision.min_side_edge == 9
 
 
 def test_recommended_profile_overlays_supported_learning_changes(tmp_path) -> None:
