@@ -29,9 +29,12 @@ class FactorConfig(BaseModel):
 
 
 class DecisionRuleConfig(BaseModel):
-    min_pass_count: int = Field(4, ge=1, le=6)
-    min_total_score: float = Field(68.0, ge=0, le=100)
-    min_side_edge: float = Field(12.0, ge=0, le=100)
+    # Bootstrap gates are deliberately moderate so the model can collect enough
+    # DEMO/forward evidence to learn. Profitability still has to be proven by
+    # forward expectancy; these values are not a profit target or guarantee.
+    min_pass_count: int = Field(3, ge=1, le=6)
+    min_total_score: float = Field(50.0, ge=0, le=100)
+    min_side_edge: float = Field(9.0, ge=0, le=100)
 
 
 class SafetyConfig(BaseModel):
@@ -42,12 +45,16 @@ class SafetyConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    # Thresholds are aligned with the score ranges emitted by analyzers.py.
+    # In particular, static/order-block normally tops out near 60 without an
+    # impulse proxy, so the old required threshold of 65 starved the system of
+    # signals and prevented forward learning.
     dynamic_levels: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=True)
-    static_levels: FactorConfig = FactorConfig(min_score=65, weight=1.2, required=True)
-    fibonacci: FactorConfig = FactorConfig(min_score=55, weight=0.8, required=False)
-    patterns: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=False)
-    pivots: FactorConfig = FactorConfig(min_score=55, weight=0.8, required=False)
-    divergence: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=False)
+    static_levels: FactorConfig = FactorConfig(min_score=50, weight=1.2, required=True)
+    fibonacci: FactorConfig = FactorConfig(min_score=45, weight=0.8, required=False)
+    patterns: FactorConfig = FactorConfig(min_score=45, weight=1.0, required=False)
+    pivots: FactorConfig = FactorConfig(min_score=40, weight=0.8, required=False)
+    divergence: FactorConfig = FactorConfig(min_score=40, weight=1.0, required=False)
     decision: DecisionRuleConfig = DecisionRuleConfig()
     safety: SafetyConfig = SafetyConfig()
 
