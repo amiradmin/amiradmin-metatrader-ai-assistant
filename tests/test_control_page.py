@@ -11,3 +11,7 @@ def test_control_page_exposes_cross_engine_comparison() -> None:
     assert "function runLonaPeriod()" in html
     assert "Profit factor" in html
     assert "Max drawdown" in html
+    assert "/backtest/range" in html
+    assert "Continuous Stable-Baseline parity" in html
+    assert "No daily forced close" in html
+    assert "RANGE_CLOSE" in html
