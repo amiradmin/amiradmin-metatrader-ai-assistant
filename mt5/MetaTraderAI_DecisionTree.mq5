@@ -1,0 +1,483 @@
+#property strict
+#property version   "0.10"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution"
+
+#include <Trade/Trade.mqh>
+
+input string TradeSymbol = "XAUUSD_o";
+input string BridgeBaseUrl = "http://127.0.0.1:8000";
+input ENUM_TIMEFRAMES AnalysisTimeframe = PERIOD_M15;
+input int SnapshotBars = 120;
+input int SignalSeconds = 15;
+input int RequestTimeoutMs = 10000;
+
+input bool EnableAutoTrading = true;
+input bool DemoOnly = true;
+input double RiskPercent = 0.50;
+input double RewardRiskRatio = 2.0;
+input int MaxOpenTrades = 1;
+input int SlippagePoints = 20;
+input ulong MagicNumber = 26090501;
+input int AtrPeriod = 14;
+input double AtrMultiplier = 1.50;
+input int MinStopPoints = 150;
+input int MaxStopPoints = 1200;
+
+input int PanelLeft = 20;
+input int PanelTop = 30;
+input int PanelWidth = 610;
+input int PanelHeight = 455;
+input int PanelFontSize = 12;
+
+CTrade Trade;
+int AtrHandle = INVALID_HANDLE;
+ulong LastSignalCheckMs = 0;
+string LastExecutedSignalId = "";
+string ActiveSignalId = "";
+double ActiveInitialRiskMoney = 0.0;
+string PanelPrefix = "MTAI6_";
+
+string AccountModeText()
+{
+   ENUM_ACCOUNT_TRADE_MODE mode = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   if(mode == ACCOUNT_TRADE_MODE_DEMO) return "DEMO";
+   if(mode == ACCOUNT_TRADE_MODE_REAL) return "REAL";
+   if(mode == ACCOUNT_TRADE_MODE_CONTEST) return "CONTEST";
+   return "UNKNOWN";
+}
+
+string TfText()
+{
+   if(AnalysisTimeframe == PERIOD_M15) return "M15";
+   if(AnalysisTimeframe == PERIOD_M5) return "M5";
+   if(AnalysisTimeframe == PERIOD_H1) return "H1";
+   return EnumToString(AnalysisTimeframe);
+}
+
+string JsonEscape(string value)
+{
+   StringReplace(value, "\\", "\\\\");
+   StringReplace(value, "\"", "\\\"");
+   return value;
+}
+
+bool JsonBool(const string json, const string key, const bool fallback=false)
+{
+   string needle = "\"" + key + "\"";
+   int p = StringFind(json, needle);
+   if(p < 0) return fallback;
+   p = StringFind(json, ":", p + StringLen(needle));
+   if(p < 0) return fallback;
+   string tail = StringSubstr(json, p + 1, 8);
+   StringTrimLeft(tail);
+   if(StringFind(tail, "true") == 0) return true;
+   if(StringFind(tail, "false") == 0) return false;
+   return fallback;
+}
+
+string JsonString(const string json, const string key, const string fallback="")
+{
+   string needle = "\"" + key + "\"";
+   int p = StringFind(json, needle);
+   if(p < 0) return fallback;
+   p = StringFind(json, ":", p + StringLen(needle));
+   if(p < 0) return fallback;
+   p++;
+   int n = StringLen(json);
+   while(p < n && (StringGetCharacter(json,p)==32 || StringGetCharacter(json,p)==9)) p++;
+   if(p >= n || StringGetCharacter(json,p) != 34) return fallback;
+   int e = StringFind(json, "\"", p + 1);
+   if(e < 0) return fallback;
+   return StringSubstr(json, p + 1, e - p - 1);
+}
+
+double JsonNumber(const string json, const string key, const double fallback=0.0)
+{
+   string needle = "\"" + key + "\"";
+   int p = StringFind(json, needle);
+   if(p < 0) return fallback;
+   p = StringFind(json, ":", p + StringLen(needle));
+   if(p < 0) return fallback;
+   p++;
+   int n = StringLen(json);
+   while(p < n && (StringGetCharacter(json,p)==32 || StringGetCharacter(json,p)==9)) p++;
+   int e = p;
+   while(e < n)
+   {
+      ushort c = StringGetCharacter(json,e);
+      if(c==44 || c==125 || c==93 || c==32 || c==10 || c==13) break;
+      e++;
+   }
+   string value = StringSubstr(json,p,e-p);
+   if(value == "null" || value == "") return fallback;
+   return StringToDouble(value);
+}
+
+string FactorObject(const string json, const string factor_name)
+{
+   string needle = "\"name\":\"" + factor_name + "\"";
+   int p = StringFind(json, needle);
+   if(p < 0)
+   {
+      needle = "\"name\": \"" + factor_name + "\"";
+      p = StringFind(json, needle);
+   }
+   if(p < 0) return "";
+   int start = p;
+   while(start >= 0 && StringGetCharacter(json,start) != 123) start--;
+   if(start < 0) return "";
+   int depth = 0;
+   for(int i=start; i<StringLen(json); i++)
+   {
+      ushort c = StringGetCharacter(json,i);
+      if(c == 123) depth++;
+      if(c == 125)
+      {
+         depth--;
+         if(depth == 0) return StringSubstr(json,start,i-start+1);
+      }
+   }
+   return "";
+}
+
+bool BuildSnapshotJson(string &payload)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(TradeSymbol, tick) || tick.bid <= 0 || tick.ask <= 0)
+      return false;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int need = MathMax(60, SnapshotBars);
+   int copied = CopyRates(TradeSymbol, AnalysisTimeframe, 1, need, rates);
+   if(copied < 60)
+      return false;
+
+   double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+   long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
+
+   double d1h = iHigh(TradeSymbol, PERIOD_D1, 1);
+   double d1l = iLow(TradeSymbol, PERIOD_D1, 1);
+   double d1c = iClose(TradeSymbol, PERIOD_D1, 1);
+
+   payload = "{";
+   payload += "\"symbol\":\"" + JsonEscape(TradeSymbol) + "\",";
+   payload += "\"timeframe\":\"" + TfText() + "\",";
+   payload += "\"bid\":" + DoubleToString(tick.bid, _Digits) + ",";
+   payload += "\"ask\":" + DoubleToString(tick.ask, _Digits) + ",";
+   payload += "\"point\":" + DoubleToString(point, 10) + ",";
+   payload += "\"spread_points\":" + IntegerToString((int)spread) + ",";
+   payload += "\"news_risk\":\"UNKNOWN\",";
+   payload += "\"account_mode\":\"" + AccountModeText() + "\",";
+   if(d1h > 0 && d1l > 0 && d1c > 0)
+   {
+      payload += "\"previous_day\":{";
+      payload += "\"high\":" + DoubleToString(d1h,_Digits) + ",";
+      payload += "\"low\":" + DoubleToString(d1l,_Digits) + ",";
+      payload += "\"close\":" + DoubleToString(d1c,_Digits) + "},";
+   }
+   payload += "\"bars\":[";
+   for(int i=copied-1; i>=0; i--)
+   {
+      payload += "{";
+      payload += "\"time\":" + IntegerToString((int)rates[i].time) + ",";
+      payload += "\"open\":" + DoubleToString(rates[i].open,_Digits) + ",";
+      payload += "\"high\":" + DoubleToString(rates[i].high,_Digits) + ",";
+      payload += "\"low\":" + DoubleToString(rates[i].low,_Digits) + ",";
+      payload += "\"close\":" + DoubleToString(rates[i].close,_Digits) + "}";
+      if(i > 0) payload += ",";
+   }
+   payload += "]}";
+   return true;
+}
+
+bool HttpPostJson(const string url, const string payload, string &response)
+{
+   char data[];
+   char result[];
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+   string response_headers;
+   StringToCharArray(payload, data, 0, WHOLE_ARRAY, CP_UTF8);
+   ResetLastError();
+   int code = WebRequest("POST", url, headers, RequestTimeoutMs, data, result, response_headers);
+   if(code < 0)
+   {
+      Print("MetaTraderAI WebRequest failed: ", GetLastError(), ". Add ", BridgeBaseUrl, " to Tools > Options > Expert Advisors > Allow WebRequest.");
+      return false;
+   }
+   response = CharArrayToString(result, 0, -1, CP_UTF8);
+   if(code < 200 || code >= 300)
+   {
+      Print("MetaTraderAI HTTP ", code, ": ", response);
+      return false;
+   }
+   return true;
+}
+
+void EnsurePanelObject(const string name, const int x, const int y, const int font_size=12)
+{
+   string id = PanelPrefix + name;
+   if(ObjectFind(0,id) < 0)
+      ObjectCreate(0,id,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,id,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,id,OBJPROP_XDISTANCE,PanelLeft + x);
+   ObjectSetInteger(0,id,OBJPROP_YDISTANCE,PanelTop + y);
+   ObjectSetInteger(0,id,OBJPROP_FONTSIZE,font_size);
+   ObjectSetInteger(0,id,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,id,OBJPROP_HIDDEN,true);
+   ObjectSetString(0,id,OBJPROP_FONT,"DejaVu Sans Mono");
+}
+
+void SetPanelText(const string name, const string text, const int x, const int y, color clr=clrWhite, const int font_size=12)
+{
+   EnsurePanelObject(name,x,y,font_size);
+   string id = PanelPrefix + name;
+   ObjectSetInteger(0,id,OBJPROP_COLOR,clr);
+   ObjectSetString(0,id,OBJPROP_TEXT,text);
+}
+
+void DrawPanelBackground()
+{
+   string id = PanelPrefix + "BG";
+   if(ObjectFind(0,id) < 0)
+      ObjectCreate(0,id,OBJ_RECTANGLE_LABEL,0,0,0);
+   ObjectSetInteger(0,id,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,id,OBJPROP_XDISTANCE,PanelLeft);
+   ObjectSetInteger(0,id,OBJPROP_YDISTANCE,PanelTop);
+   ObjectSetInteger(0,id,OBJPROP_XSIZE,PanelWidth);
+   ObjectSetInteger(0,id,OBJPROP_YSIZE,PanelHeight);
+   ObjectSetInteger(0,id,OBJPROP_BGCOLOR,C'22,26,33');
+   ObjectSetInteger(0,id,OBJPROP_BORDER_COLOR,C'70,78,90');
+   ObjectSetInteger(0,id,OBJPROP_BACK,false);
+   ObjectSetInteger(0,id,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,id,OBJPROP_HIDDEN,true);
+}
+
+string PassMark(const bool passed) { return passed ? "PASS" : "FAIL"; }
+color PassColor(const bool passed) { return passed ? clrLime : clrTomato; }
+
+void DrawDecisionPanel(const string json)
+{
+   DrawPanelBackground();
+   string candidate = JsonString(json,"candidate","WAIT");
+   string decision = JsonString(json,"decision","WAIT");
+   double buy_score = JsonNumber(json,"buy_score",0);
+   double sell_score = JsonNumber(json,"sell_score",0);
+   int passed_count = (int)JsonNumber(json,"passed_count",0);
+   int min_pass = (int)JsonNumber(json,"min_pass_count",4);
+   bool allowed = JsonBool(json,"trade_allowed",false);
+
+   color decision_color = decision == "BUY" ? clrLime : decision == "SELL" ? clrTomato : clrGold;
+   SetPanelText("TITLE","META TRADER AI v2 | SIX-FACTOR DECISION TREE",14,12,clrWhite,PanelFontSize+1);
+   SetPanelText("HEAD",TradeSymbol+" | "+TfText()+" | candidate="+candidate+" | FINAL="+decision,14,40,decision_color,PanelFontSize);
+   SetPanelText("SCORES","BUY "+DoubleToString(buy_score,1)+" | SELL "+DoubleToString(sell_score,1)+" | passed "+IntegerToString(passed_count)+"/6 | need "+IntegerToString(min_pass)+"/6",14,65,clrWhite,PanelFontSize);
+
+   string names[6] = {"dynamic_levels","static_levels","fibonacci","patterns","pivots","divergence"};
+   string labels[6] = {"Dynamic levels","Static / OrderBlock","Fibonacci","Patterns / Harmonic","Pivots","Divergence / Momentum"};
+   for(int i=0;i<6;i++)
+   {
+      string obj = FactorObject(json,names[i]);
+      double score = JsonNumber(obj,"candidate_score",0);
+      double min_score = JsonNumber(obj,"min_score",0);
+      bool passed = JsonBool(obj,"passed",false);
+      string prefix = (i == 5 ? "`- " : "|- ");
+      string line = prefix + labels[i] + "  " + DoubleToString(score,1) + "/" + DoubleToString(min_score,0) + "  " + PassMark(passed);
+      SetPanelText("F"+IntegerToString(i),line,24,96+i*35,PassColor(passed),PanelFontSize);
+   }
+
+   string perf = "PERF: trades="+IntegerToString((int)JsonNumber(json,"trades",0))+
+                 "  E="+DoubleToString(JsonNumber(json,"expectancy_r",0),2)+"R"+
+                 "  WR="+DoubleToString(JsonNumber(json,"win_rate",0),1)+"%"+
+                 "  DD="+DoubleToString(JsonNumber(json,"max_drawdown_r",0),2)+"R"+
+                 "  trend="+JsonString(json,"trend","COLLECTING");
+   SetPanelText("PERF",perf,14,320,clrAqua,PanelFontSize);
+
+   string status = allowed ? "EXECUTION: ARMED - signal may open a DEMO position" : "EXECUTION: BLOCKED / WAIT";
+   SetPanelText("EXEC",status,14,350,allowed ? clrLime : clrGold,PanelFontSize);
+   SetPanelText("CFG","Thresholds are live from Bridge: GET/PUT /strategy/config",14,380,clrSilver,PanelFontSize-1);
+   SetPanelText("SAFE","Local hard gate: DemoOnly="+(DemoOnly?"true":"false")+" | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,405,clrSilver,PanelFontSize-1);
+   ChartRedraw();
+}
+
+int ManagedOpenPositions()
+{
+   int count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=TradeSymbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      count++;
+   }
+   return count;
+}
+
+double NormalizeVolumeDown(double volume)
+{
+   double minv = SymbolInfoDouble(TradeSymbol,SYMBOL_VOLUME_MIN);
+   double maxv = SymbolInfoDouble(TradeSymbol,SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(TradeSymbol,SYMBOL_VOLUME_STEP);
+   if(step <= 0 || maxv <= 0) return 0.0;
+   volume = MathMin(volume,maxv);
+   volume = MathFloor(volume/step + 1e-9)*step;
+   if(volume < minv) return 0.0;
+   int digits = 2;
+   if(step < 0.01) digits=3;
+   if(step < 0.001) digits=4;
+   return NormalizeDouble(volume,digits);
+}
+
+bool BuildTradePlan(const string side, double &stop, double &target, double &volume, double &risk_money)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(TradeSymbol,tick)) return false;
+   double atr_buf[];
+   ArraySetAsSeries(atr_buf,true);
+   if(CopyBuffer(AtrHandle,0,1,1,atr_buf) < 1 || atr_buf[0] <= 0) return false;
+   double point = SymbolInfoDouble(TradeSymbol,SYMBOL_POINT);
+   if(point <= 0) return false;
+   double entry = side == "BUY" ? tick.ask : tick.bid;
+   double stop_points = MathMax((double)MinStopPoints, atr_buf[0]*AtrMultiplier/point);
+   if(MaxStopPoints > 0) stop_points = MathMin(stop_points,(double)MaxStopPoints);
+   long broker_level = SymbolInfoInteger(TradeSymbol,SYMBOL_TRADE_STOPS_LEVEL);
+   stop_points = MathMax(stop_points,(double)broker_level+5.0);
+   int digits = (int)SymbolInfoInteger(TradeSymbol,SYMBOL_DIGITS);
+   if(side == "BUY")
+   {
+      stop = NormalizeDouble(entry-stop_points*point,digits);
+      target = NormalizeDouble(entry+stop_points*RewardRiskRatio*point,digits);
+   }
+   else
+   {
+      stop = NormalizeDouble(entry+stop_points*point,digits);
+      target = NormalizeDouble(entry-stop_points*RewardRiskRatio*point,digits);
+   }
+   ENUM_ORDER_TYPE type = side == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double one_lot_profit=0.0;
+   if(!OrderCalcProfit(type,TradeSymbol,1.0,entry,stop,one_lot_profit)) return false;
+   double one_lot_loss=MathAbs(one_lot_profit);
+   if(one_lot_loss<=0) return false;
+   double target_risk=AccountInfoDouble(ACCOUNT_EQUITY)*RiskPercent/100.0;
+   volume=NormalizeVolumeDown(target_risk/one_lot_loss);
+   if(volume<=0) return false;
+   double actual_loss=0.0;
+   if(!OrderCalcProfit(type,TradeSymbol,volume,entry,stop,actual_loss)) return false;
+   risk_money=MathAbs(actual_loss);
+   return risk_money>0;
+}
+
+void MaybeExecute(const string json)
+{
+   if(!EnableAutoTrading) return;
+   if(DemoOnly && AccountModeText() != "DEMO") return;
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
+   if(!JsonBool(json,"trade_allowed",false)) return;
+   string side=JsonString(json,"decision","WAIT");
+   if(side!="BUY" && side!="SELL") return;
+   string signal_id=JsonString(json,"signal_id","");
+   if(signal_id=="" || signal_id==LastExecutedSignalId) return;
+   if(ManagedOpenPositions() >= MaxOpenTrades) return;
+
+   double stop=0,target=0,volume=0,risk_money=0;
+   if(!BuildTradePlan(side,stop,target,volume,risk_money))
+   {
+      Print("MetaTraderAI: trade plan failed; no order sent.");
+      return;
+   }
+
+   Trade.SetExpertMagicNumber(MagicNumber);
+   Trade.SetDeviationInPoints(SlippagePoints);
+   Trade.SetTypeFillingBySymbol(TradeSymbol);
+   Trade.SetAsyncMode(false);
+   bool ok = side=="BUY"
+      ? Trade.Buy(volume,TradeSymbol,0.0,stop,target,"MTAI6 "+signal_id)
+      : Trade.Sell(volume,TradeSymbol,0.0,stop,target,"MTAI6 "+signal_id);
+   if(!ok)
+   {
+      Print("MetaTraderAI order failed: ",Trade.ResultRetcode()," ",Trade.ResultRetcodeDescription());
+      return;
+   }
+   LastExecutedSignalId=signal_id;
+   ActiveSignalId=signal_id;
+   ActiveInitialRiskMoney=risk_money;
+   Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2));
+}
+
+void RecordClosedDeal(const ulong deal_ticket)
+{
+   if(deal_ticket==0 || !HistoryDealSelect(deal_ticket)) return;
+   if(HistoryDealGetString(deal_ticket,DEAL_SYMBOL)!=TradeSymbol) return;
+   if((ulong)HistoryDealGetInteger(deal_ticket,DEAL_MAGIC)!=MagicNumber) return;
+   ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal_ticket,DEAL_ENTRY);
+   if(entry!=DEAL_ENTRY_OUT && entry!=DEAL_ENTRY_OUT_BY) return;
+   if(ActiveSignalId=="" || ActiveInitialRiskMoney<=0) return;
+
+   double pnl=HistoryDealGetDouble(deal_ticket,DEAL_PROFIT)+HistoryDealGetDouble(deal_ticket,DEAL_SWAP)+HistoryDealGetDouble(deal_ticket,DEAL_COMMISSION);
+   double r=pnl/ActiveInitialRiskMoney;
+   ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket,DEAL_TYPE);
+   string closed_side = type==DEAL_TYPE_SELL ? "BUY" : "SELL";
+   string payload="{";
+   payload+="\"signal_id\":\""+JsonEscape(ActiveSignalId)+"\",";
+   payload+="\"symbol\":\""+JsonEscape(TradeSymbol)+"\",";
+   payload+="\"side\":\""+closed_side+"\",";
+   payload+="\"pnl_money\":"+DoubleToString(pnl,2)+",";
+   payload+="\"r_multiple\":"+DoubleToString(r,6)+"}";
+   string response;
+   if(HttpPostJson(BridgeBaseUrl+"/performance/trades",payload,response))
+      Print("MetaTraderAI recorded outcome: ",DoubleToString(r,2),"R | ",response);
+   ActiveSignalId="";
+   ActiveInitialRiskMoney=0.0;
+}
+
+void AnalyzeNow()
+{
+   string payload;
+   if(!BuildSnapshotJson(payload))
+   {
+      SetPanelText("ERROR","Waiting for enough market data...",14,40,clrGold,PanelFontSize);
+      return;
+   }
+   string response;
+   if(!HttpPostJson(BridgeBaseUrl+"/analyze",payload,response))
+   {
+      DrawPanelBackground();
+      SetPanelText("TITLE","META TRADER AI v2 | BRIDGE OFFLINE",14,12,clrTomato,PanelFontSize+1);
+      SetPanelText("ERROR","Check Python bridge and MT5 WebRequest allow-list: "+BridgeBaseUrl,14,48,clrGold,PanelFontSize);
+      return;
+   }
+   DrawDecisionPanel(response);
+   MaybeExecute(response);
+}
+
+int OnInit()
+{
+   if(!SymbolSelect(TradeSymbol,true)) return INIT_FAILED;
+   AtrHandle=iATR(TradeSymbol,AnalysisTimeframe,AtrPeriod);
+   if(AtrHandle==INVALID_HANDLE) return INIT_FAILED;
+   EventSetTimer(1);
+   DrawPanelBackground();
+   SetPanelText("TITLE","META TRADER AI v2 | STARTING...",14,12,clrWhite,PanelFontSize+1);
+   return INIT_SUCCEEDED;
+}
+
+void OnTimer()
+{
+   ulong now=GetTickCount64();
+   if(now-LastSignalCheckMs < (ulong)MathMax(1,SignalSeconds)*1000) return;
+   LastSignalCheckMs=now;
+   AnalyzeNow();
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
+{
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD) RecordClosedDeal(trans.deal);
+}
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   if(AtrHandle!=INVALID_HANDLE) IndicatorRelease(AtrHandle);
+   ObjectsDeleteAll(0,PanelPrefix);
+}
