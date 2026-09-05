@@ -1,6 +1,6 @@
 #property strict
-#property version   "0.23"
-#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge concurrency/risk control and historical replay sync"
+#property version   "0.24"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge controls, live tick-volume context and historical replay sync"
 
 #include <Trade/Trade.mqh>
 
@@ -267,7 +267,8 @@ bool BuildSnapshotJson(string &payload)
       payload += "\"open\":" + DoubleToString(rates[i].open,_Digits) + ",";
       payload += "\"high\":" + DoubleToString(rates[i].high,_Digits) + ",";
       payload += "\"low\":" + DoubleToString(rates[i].low,_Digits) + ",";
-      payload += "\"close\":" + DoubleToString(rates[i].close,_Digits) + "}";
+      payload += "\"close\":" + DoubleToString(rates[i].close,_Digits) + ",";
+      payload += "\"tick_volume\":" + IntegerToString((int)rates[i].tick_volume) + "}";
       if(i > 0) payload += ",";
    }
    payload += "]}";
