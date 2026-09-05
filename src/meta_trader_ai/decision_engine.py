@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .analyzers import RawFactorScore, analyze_all
+from .analyzers import RawFactorScore, analyze_all, market_regime
 from .models import Decision, DecisionResponse, FactorScore, MarketSnapshot, PerformanceSummary, SafetyGate, StrategyConfig
 
 
@@ -33,6 +33,26 @@ def _safety(snapshot: MarketSnapshot, config: StrategyConfig) -> list[SafetyGate
     account_ok = not config.safety.demo_only or snapshot.account_mode == "DEMO"
     gates.append(SafetyGate(name="account_mode", passed=account_ok, reason=f"account_mode={snapshot.account_mode}; demo_only={config.safety.demo_only}"))
     gates.append(SafetyGate(name="market_data", passed=snapshot.ask > snapshot.bid > 0 and snapshot.point > 0, reason="bid/ask/point sanity check"))
+
+    regime = market_regime(snapshot)
+    if config.safety.regime_filter_enabled:
+        regime_ok = (
+            regime.trend_strength_atr >= config.safety.regime_min_trend_atr
+            and regime.atr_ratio >= config.safety.regime_min_atr_ratio
+        )
+        regime_reason = (
+            f"regime trend={regime.trend_strength_atr:.2f} ATR "
+            f"(min {config.safety.regime_min_trend_atr:.2f}); "
+            f"ATR ratio={regime.atr_ratio:.2f} "
+            f"(min {config.safety.regime_min_atr_ratio:.2f})"
+        )
+    else:
+        regime_ok = True
+        regime_reason = (
+            f"regime filter disabled; trend={regime.trend_strength_atr:.2f} ATR; "
+            f"ATR ratio={regime.atr_ratio:.2f}"
+        )
+    gates.append(SafetyGate(name="market_regime", passed=regime_ok, reason=regime_reason))
     return gates
 
 
