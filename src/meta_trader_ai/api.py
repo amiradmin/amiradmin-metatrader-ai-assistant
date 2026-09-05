@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .backtest_date import ReplaySettings, run_date_backtest
 from .config_store import StrategyConfigStore
@@ -10,6 +10,7 @@ from .decision_engine import build_decision
 from .history import HistoryStore
 from .journal import DecisionJournal
 from .learning import model_recommended_config, recommend_thresholds
+from .lona_store import LonaReportStore
 from .models import (
     BacktestSummary,
     DecisionResponse,
@@ -25,11 +26,12 @@ from .performance import PerformanceStore
 from .training import TrainingRequest, train_thresholds
 from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.1")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.2")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
 history_store = HistoryStore()
+lona_store = LonaReportStore()
 
 
 @app.get("/health")
@@ -40,6 +42,7 @@ def health() -> dict[str, str]:
         "execution": "mt5-demo-guarded",
         "historical_replay": "multi-position-enabled",
         "training_lab": "multi-position-enabled",
+        "lona_validation": "panel-enabled",
     }
 
 
@@ -58,8 +61,6 @@ def _recommended_payload() -> dict[str, object]:
     recommended, learning, source = model_recommended_config(
         performance_store.load(), decision_journal
     )
-    # Recommendation logic optimizes signal thresholds. Execution/safety settings
-    # remain operator-controlled and are not silently reset by the model.
     recommended.safety = current.safety.model_copy(deep=True)
     return {
         "source": source,
@@ -103,6 +104,38 @@ def sync_history(payload: HistorySync) -> HistoryStatus:
 @app.get("/history/status", response_model=HistoryStatus)
 def history_status(symbol: str = "XAUUSD_o", timeframe: str = "M15") -> HistoryStatus:
     return history_store.status(symbol, timeframe)
+
+
+@app.get("/history/export.csv")
+def export_history_csv(symbol: str = "XAUUSD_o", timeframe: str = "M15") -> StreamingResponse:
+    history = history_store.load(symbol, timeframe)
+    if not history:
+        raise HTTPException(status_code=409, detail="No MT5 history synced yet.")
+
+    def rows():
+        yield "timestamp,broker_date,open,high,low,close,spread_points\n"
+        for bar in history:
+            yield (
+                f"{bar.time},{bar.broker_date},{bar.open},{bar.high},{bar.low},"
+                f"{bar.close},{bar.spread_points}\n"
+            )
+
+    filename = f"{symbol}_{timeframe}_mt5_history.csv"
+    return StreamingResponse(
+        rows(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/lona/status")
+def lona_status() -> dict[str, object]:
+    return lona_store.load()
+
+
+@app.post("/lona/status")
+def import_lona_status(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+    return lona_store.save(payload)
 
 
 @app.get("/backtest", response_model=BacktestSummary)
