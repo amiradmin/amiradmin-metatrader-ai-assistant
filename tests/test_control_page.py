@@ -79,7 +79,23 @@ def test_control_page_has_ninja_aggressive_demo_preset() -> None:
     assert "setBound('risk_percent',2.0)" in html
     assert "setBound('reward_risk_ratio',2.5)" in html
     assert "cfg.safety.demo_only=true" in html
-    assert "regime unchanged" in html
+    assert "regime/workflow unchanged" in html
+
+
+def test_control_page_has_independent_workflow_source_checkboxes() -> None:
+    html = control_page_html()
+
+    assert "Optional workflow signal overlays" in html
+    assert 'id="myfxbook_enabled"' in html
+    assert 'id="order_flow_enabled"' in html
+    assert 'id="cot_enabled"' in html
+    assert 'id="integrationStatus"' in html
+    assert "cfg.integrations.myfxbook_enabled" in html
+    assert "cfg.integrations.order_flow_enabled" in html
+    assert "cfg.integrations.cot_enabled" in html
+    assert "/integrations/status" in html
+    assert "IN WORKFLOW" in html
+    assert "Historical replay intentionally does not inject today's Myfxbook/COT data" in html
 
 
 def test_training_page_has_tooltips_and_cross_period_stability() -> None:
