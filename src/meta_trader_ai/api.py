@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse
 
 from .backtest_date import ReplaySettings, run_date_backtest
 from .config_store import StrategyConfigStore
+from .control_page import control_page_html
 from .decision_engine import build_decision
 from .history import HistoryStore
 from .journal import DecisionJournal
@@ -24,7 +25,7 @@ from .performance import PerformanceStore
 from .training import TrainingRequest, train_thresholds
 from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.0")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.1")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
@@ -37,8 +38,8 @@ def health() -> dict[str, str]:
         "status": "ok",
         "engine": "six-factor-explainable",
         "execution": "mt5-demo-guarded",
-        "historical_replay": "enabled",
-        "training_lab": "enabled",
+        "historical_replay": "multi-position-enabled",
+        "training_lab": "multi-position-enabled",
     }
 
 
@@ -53,10 +54,13 @@ def put_strategy_config(config: StrategyConfig) -> StrategyConfig:
 
 
 def _recommended_payload() -> dict[str, object]:
+    current = config_store.load()
     recommended, learning, source = model_recommended_config(
-        performance_store.load(),
-        decision_journal,
+        performance_store.load(), decision_journal
     )
+    # Recommendation logic optimizes signal thresholds. Execution/safety settings
+    # remain operator-controlled and are not silently reset by the model.
+    recommended.safety = current.safety.model_copy(deep=True)
     return {
         "source": source,
         "sample_size": learning.sample_size,
@@ -65,7 +69,7 @@ def _recommended_payload() -> dict[str, object]:
         "config": recommended.model_dump(mode="json"),
         "proposed_thresholds": learning.proposed_thresholds,
         "reasons": learning.reasons,
-        "risk_policy": "Signal thresholds only; risk is never increased automatically.",
+        "risk_policy": "Signal thresholds only; execution limits and risk are not raised automatically.",
     }
 
 
@@ -76,10 +80,11 @@ def get_recommended_strategy() -> dict[str, object]:
 
 @app.post("/strategy/apply-recommended", response_model=StrategyConfig)
 def apply_recommended_strategy() -> StrategyConfig:
+    current = config_store.load()
     recommended, _, _ = model_recommended_config(
-        performance_store.load(),
-        decision_journal,
+        performance_store.load(), decision_journal
     )
+    recommended.safety = current.safety.model_copy(deep=True)
     return config_store.save(recommended)
 
 
@@ -108,11 +113,12 @@ def date_backtest(
     starting_balance: float = Query(1000.0, gt=0, le=100_000_000),
     risk_percent: float = Query(0.5, gt=0, le=5.0),
     reward_risk_ratio: float = Query(2.0, ge=0.5, le=10.0),
+    max_open_trades: int = Query(1, ge=1, le=5),
 ) -> BacktestSummary:
     history = history_store.load(symbol, timeframe)
     point = history_store.point(symbol, timeframe)
     if not history or point is None:
-        raise HTTPException(status_code=409, detail="No MT5 history synced yet. Keep the updated EA attached and wait for history sync.")
+        raise HTTPException(status_code=409, detail="No MT5 history synced yet.")
     try:
         return run_date_backtest(
             history=history,
@@ -125,6 +131,7 @@ def date_backtest(
                 starting_balance=starting_balance,
                 risk_percent=risk_percent,
                 reward_risk_ratio=reward_risk_ratio,
+                max_open_trades=max_open_trades,
             ),
         )
     except ValueError as exc:
@@ -136,7 +143,7 @@ def run_training(request: TrainingRequest) -> dict[str, object]:
     history = history_store.load(request.symbol, request.timeframe)
     point = history_store.point(request.symbol, request.timeframe)
     if not history or point is None:
-        raise HTTPException(status_code=409, detail="No MT5 history synced yet. Keep the EA attached and wait for history sync.")
+        raise HTTPException(status_code=409, detail="No MT5 history synced yet.")
     base_config = StrategyConfig() if request.base_profile == "MODEL_BASELINE" else config_store.load()
     try:
         return train_thresholds(
@@ -172,56 +179,4 @@ def learning_recommendation() -> LearningRecommendation:
 
 @app.get("/control", response_class=HTMLResponse)
 def control_panel() -> str:
-    return r'''<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MetaTrader AI Bridge Control</title>
-<style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#111827;color:#e5e7eb;margin:0;padding:24px}.wrap{max-width:1100px;margin:auto}.card{background:#1f2937;border:1px solid #374151;border-radius:16px;padding:20px;margin:14px 0}.row{display:grid;grid-template-columns:220px 1fr 80px;gap:14px;align-items:center;margin:14px 0}.btrow{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:12px}.field label{display:block;color:#9ca3af;font-size:13px;margin-bottom:6px}input[type=range]{width:100%}input[type=number],input[type=date]{width:100%;background:#111827;color:#fff;border:1px solid #4b5563;border-radius:8px;padding:9px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:11px 18px;font-weight:700;cursor:pointer}button.recommended{background:#0f766e}button:disabled{opacity:.5;cursor:not-allowed}.ok{color:#4ade80}.bad{color:#fb7185}.warn{color:#fbbf24}.muted{color:#9ca3af}code{color:#93c5fd}.metrics{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px;margin-top:16px}.metric{background:#111827;border:1px solid #374151;border-radius:12px;padding:12px}.metric b{display:block;font-size:22px;margin-top:4px}.tablewrap{overflow:auto;margin-top:14px}table{width:100%;border-collapse:collapse;min-width:850px}th,td{padding:9px;border-bottom:1px solid #374151;text-align:left;font-size:13px}th{color:#9ca3af}.pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#374151}@media(max-width:900px){.btrow,.metrics{grid-template-columns:1fr 1fr}}@media(max-width:760px){body{padding:12px}.row{grid-template-columns:1fr}}@media(max-width:460px){.btrow,.metrics{grid-template-columns:1fr}}
-</style>
-</head>
-<body><div class="wrap">
-<h1>MetaTrader AI v2 — Bridge Control</h1>
-<p class="muted">Live thresholds plus historical M15 replay from bars synced automatically by the MT5 EA.</p>
-<p><a href="/train" style="color:#bfdbfe;text-decoration:none;border:1px solid #374151;border-radius:10px;padding:9px 12px;display:inline-block">Open Training Lab →</a></p>
-<div class="card" id="factors"></div>
-<div class="card"><h2>Decision gates</h2><div class="row"><label>Minimum passed factors</label><input id="min_pass_count" type="range" min="1" max="6"><input id="min_pass_count_n" type="number" min="1" max="6"></div><div class="row"><label>Minimum total score</label><input id="min_total_score" type="range" min="0" max="100"><input id="min_total_score_n" type="number" min="0" max="100"></div><div class="row"><label>Minimum BUY/SELL edge</label><input id="min_side_edge" type="range" min="0" max="100"><input id="min_side_edge_n" type="number" min="0" max="100"></div></div>
-<button id="saveBtn">Save live thresholds</button> <span id="status"></span>
-
-<div class="card">
-<h2>Model-recommended profile</h2>
-<p id="recommendInfo" class="muted">Checking recommendation…</p>
-<p><button id="recommendBtn" class="recommended">Apply model-recommended settings</button> <span id="recommendStatus"></span></p>
-<p class="muted">This resets manual slider edits to our canonical model profile. Once enough closed forward trades exist, evidence-backed learned threshold changes are layered on top. It never raises risk automatically. Our income target can be tracked separately as a KPI; it is not a guaranteed return.</p>
-</div>
-
-<div class="card">
-<h2>Historical range replay</h2>
-<p id="historyStatus" class="muted">Checking MT5 history sync…</p>
-<div class="btrow">
-<div class="field"><label for="btStartDate">Start date (broker/chart)</label><input id="btStartDate" type="date"></div>
-<div class="field"><label for="btEndDate">End date (broker/chart)</label><input id="btEndDate" type="date"></div>
-<div class="field"><label for="btBalance">Starting balance $</label><input id="btBalance" type="number" min="10" step="10" value="1000"></div>
-<div class="field"><label for="btRisk">Risk per trade %</label><input id="btRisk" type="number" min="0.01" max="5" step="0.05" value="0.5"></div>
-<div class="field"><label for="btRR">Reward : Risk</label><input id="btRR" type="number" min="0.5" max="10" step="0.1" value="2"></div>
-</div>
-<p><button id="runBt" disabled>Run selected range</button> <span id="btMsg" class="muted"></span></p>
-<div id="btResult"></div>
-</div>
-<p class="muted">Live performance: <code>/performance</code> • Model profile: <code>/strategy/recommended</code> • Learning candidate: <code>/learning/recommendation</code> • History: <code>/history/status</code></p>
-</div>
-<script>
-const factorNames=['dynamic_levels','static_levels','fibonacci','patterns','pivots','divergence'];let cfg;let availableDates=[];
-function bind(id,obj,key){const r=document.getElementById(id),n=document.getElementById(id+'_n');r.value=obj[key];n.value=obj[key];r.addEventListener('input',()=>n.value=r.value);n.addEventListener('input',()=>r.value=n.value);}
-function setConfigInputs(config){for(const name of factorNames){document.getElementById(name).value=config[name].min_score;document.getElementById(name+'_n').value=config[name].min_score;}for(const id of ['min_pass_count','min_total_score','min_side_edge']){document.getElementById(id).value=config.decision[id];document.getElementById(id+'_n').value=config.decision[id];}}
-async function load(){cfg=await(await fetch('/strategy/config')).json();const box=document.getElementById('factors');box.innerHTML='<h2>Factor minimums</h2>';for(const name of factorNames){box.insertAdjacentHTML('beforeend',`<div class="row"><label>${name.replaceAll('_',' ')}</label><input id="${name}" type="range" min="0" max="100" step="1"><input id="${name}_n" type="number" min="0" max="100" step="1"></div>`);bind(name,cfg[name],'min_score');}bind('min_pass_count',cfg.decision,'min_pass_count');bind('min_total_score',cfg.decision,'min_total_score');bind('min_side_edge',cfg.decision,'min_side_edge');await Promise.all([loadHistory(),loadRecommendation()]);}
-async function save(){for(const name of factorNames)cfg[name].min_score=Number(document.getElementById(name).value);cfg.decision.min_pass_count=Number(document.getElementById('min_pass_count').value);cfg.decision.min_total_score=Number(document.getElementById('min_total_score').value);cfg.decision.min_side_edge=Number(document.getElementById('min_side_edge').value);const res=await fetch('/strategy/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});const st=document.getElementById('status');if(res.ok){cfg=await res.json();st.textContent='Saved';st.className='ok';}else{st.textContent='Save failed';st.className='bad';}}
-async function loadRecommendation(){const el=document.getElementById('recommendInfo');try{const r=await(await fetch('/strategy/recommended')).json();const source=r.source==='LEARNED_OVERLAY'?'learned overlay':'canonical baseline';const extra=r.learning_status==='INSUFFICIENT_DATA'?` • ${r.sample_size}/30 closed forward trades collected`:` • ${r.sample_size} closed forward trades`;el.textContent=`Recommended source: ${source}${extra}. ${r.reasons.join(' ')}`;el.className=r.source==='LEARNED_OVERLAY'?'ok':'muted';}catch(e){el.textContent='Could not read recommendation: '+e;el.className='bad';}}
-async function applyRecommended(){const btn=document.getElementById('recommendBtn'),st=document.getElementById('recommendStatus');btn.disabled=true;st.textContent='Applying…';st.className='muted';try{const res=await fetch('/strategy/apply-recommended',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||'Apply failed');cfg=data;setConfigInputs(cfg);st.textContent='Applied to live strategy';st.className='ok';document.getElementById('status').textContent='';await loadRecommendation();}catch(e){st.textContent=e.message;st.className='bad';}finally{btn.disabled=false;}}
-async function loadHistory(){const el=document.getElementById('historyStatus'),btn=document.getElementById('runBt'),start=document.getElementById('btStartDate'),end=document.getElementById('btEndDate');try{const h=await(await fetch('/history/status?symbol=XAUUSD_o&timeframe=M15')).json();if(!h.bars){el.textContent='No history synced yet. Update/recompile the EA and leave it attached for the first sync.';el.className='warn';return;}availableDates=(h.available_dates||[]).slice().sort();el.textContent=`Synced ${h.bars} bars • available ${h.earliest_date} → ${h.latest_date}`;el.className='ok';for(const input of [start,end]){input.min=h.earliest_date;input.max=h.latest_date;}if(availableDates.length){end.value=availableDates[availableDates.length-1];start.value=availableDates[Math.max(0,availableDates.length-5)];}else{start.value=h.latest_date;end.value=h.latest_date;}btn.disabled=false;}catch(e){el.textContent='Could not read history status: '+e;el.className='bad';}}
-function fmtTime(epoch){return new Date(epoch*1000).toISOString().replace('T',' ').slice(0,16);}
-function money(v){return `${v<0?'-$':'$'}${Math.abs(v).toFixed(2)}`;}
-async function runBacktest(){const btn=document.getElementById('runBt'),msg=document.getElementById('btMsg'),out=document.getElementById('btResult');const start=document.getElementById('btStartDate').value,end=document.getElementById('btEndDate').value,startingBalance=Number(document.getElementById('btBalance').value),risk=Number(document.getElementById('btRisk').value),rr=Number(document.getElementById('btRR').value);if(!start||!end||start>end||startingBalance<=0||risk<=0||rr<=0){msg.textContent='Check start/end date, balance, risk and R:R.';msg.className='bad';return;}const dates=(availableDates.length?availableDates:[]).filter(d=>d>=start&&d<=end);if(!dates.length){msg.textContent='No synced trading dates inside this range.';msg.className='bad';return;}btn.disabled=true;out.innerHTML='';let balance=startingBalance;const days=[];try{for(let i=0;i<dates.length;i++){msg.textContent=`Replaying ${dates[i]} • ${i+1}/${dates.length}…`;msg.className='muted';const qs=new URLSearchParams({date:dates[i],symbol:'XAUUSD_o',timeframe:'M15',starting_balance:String(balance),risk_percent:String(risk),reward_risk_ratio:String(rr)});const res=await fetch('/backtest?'+qs.toString());const data=await res.json();if(!res.ok)throw new Error(data.detail||`Backtest failed for ${dates[i]}`);days.push(data);balance=data.ending_balance;}const allTrades=days.flatMap(d=>d.trades_detail.map(t=>({...t,date:d.date})));const trades=days.reduce((s,d)=>s+d.trades,0),buyTrades=days.reduce((s,d)=>s+d.buy_trades,0),sellTrades=days.reduce((s,d)=>s+d.sell_trades,0),wins=days.reduce((s,d)=>s+d.wins,0),losses=days.reduce((s,d)=>s+d.losses,0),signals=days.reduce((s,d)=>s+d.signals,0),netR=days.reduce((s,d)=>s+d.net_r,0);const pnl=balance-startingBalance,winRate=trades?wins/trades*100:0,expectancy=trades?netR/trades:0,profitableDays=days.filter(d=>d.estimated_pnl_money>0).length,avgDaily=days.length?pnl/days.length:0;let cumR=0,peakR=0,maxDd=0;for(const t of allTrades){cumR+=t.r_multiple;peakR=Math.max(peakR,cumR);maxDd=Math.max(maxDd,peakR-cumR);}const gap=avgDaily-10;const dayRows=days.map(d=>`<tr><td>${d.date}</td><td>${d.trades}</td><td>${d.buy_trades}/${d.sell_trades}</td><td>${d.wins}W / ${d.losses}L</td><td>${d.win_rate.toFixed(1)}%</td><td>${d.net_r.toFixed(2)}R</td><td class="${d.estimated_pnl_money>=0?'ok':'bad'}">${money(d.estimated_pnl_money)}</td><td>$${d.ending_balance.toFixed(2)}</td></tr>`).join('');const tradeRows=allTrades.map((t,i)=>`<tr><td>${i+1}</td><td>${t.date}</td><td>${t.side}</td><td>${fmtTime(t.entry_time)}</td><td>${t.outcome}</td><td>${t.r_multiple.toFixed(2)}R</td><td class="${t.pnl_money>=0?'ok':'bad'}">${money(t.pnl_money)}</td><td>${t.passed_count}/6</td></tr>`).join('');const pnlClass=pnl>=0?'ok':'bad',avgClass=avgDaily>=10?'ok':avgDaily>=0?'warn':'bad';msg.textContent=`Done • ${days.length} trading days`;msg.className='ok';out.innerHTML=`<div class="metrics"><div class="metric"><span class="muted">Trading days</span><b>${days.length}</b><small>${profitableDays} profitable • ${days.length-profitableDays} non-profitable</small></div><div class="metric"><span class="muted">Trades</span><b>${trades}</b><small>BUY ${buyTrades} • SELL ${sellTrades} • signals ${signals}</small></div><div class="metric"><span class="muted">Win rate</span><b>${winRate.toFixed(1)}%</b><small>${wins}W / ${losses}L</small></div><div class="metric"><span class="muted">Net R</span><b>${netR.toFixed(2)}R</b><small>E ${expectancy.toFixed(2)}R/trade • DD ${maxDd.toFixed(2)}R</small></div><div class="metric"><span class="muted">Total P/L</span><b class="${pnlClass}">${money(pnl)}</b><small>$${startingBalance.toFixed(2)} → $${balance.toFixed(2)}</small></div></div><div class="metrics"><div class="metric"><span class="muted">Average P/L / trading day</span><b class="${avgClass}">${money(avgDaily)}</b><small>Target: $10/day • gap ${gap>=0?'+':''}${money(gap)}</small></div><div class="metric"><span class="muted">Profitable days</span><b>${days.length?(profitableDays/days.length*100).toFixed(1):'0.0'}%</b><small>${profitableDays}/${days.length}</small></div><div class="metric"><span class="muted">Range</span><b style="font-size:16px">${start}</b><small>to ${end}</small></div></div><h3>Daily summary</h3><div class="tablewrap"><table><thead><tr><th>Date</th><th>Trades</th><th>BUY/SELL</th><th>W/L</th><th>Win rate</th><th>Net R</th><th>P/L</th><th>End balance</th></tr></thead><tbody>${dayRows}</tbody></table></div><h3>Trades</h3><div class="tablewrap"><table><thead><tr><th>#</th><th>Date</th><th>Side</th><th>Entry</th><th>Exit</th><th>Result</th><th>P/L</th><th>Passed</th></tr></thead><tbody>${tradeRows||'<tr><td colspan="8">No trades for this range with current thresholds.</td></tr>'}</tbody></table></div><p class="muted">Each day uses the previous day ending balance, so risk compounds across the selected range. Only synced MT5 trading dates are replayed; weekends/closed days are skipped. The $10/day figure is a tracking target, not a guaranteed return.</p>`;}catch(e){msg.textContent=e.message;msg.className='bad';}finally{btn.disabled=false;}}
-document.getElementById('saveBtn').addEventListener('click',save);document.getElementById('recommendBtn').addEventListener('click',applyRecommended);document.getElementById('runBt').addEventListener('click',runBacktest);load();
-</script></body></html>'''
+    return control_page_html()
