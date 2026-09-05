@@ -26,7 +26,7 @@ from .performance import PerformanceStore
 from .training import TrainingRequest, train_thresholds
 from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.2")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.3")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
@@ -43,6 +43,7 @@ def health() -> dict[str, str]:
         "historical_replay": "multi-position-enabled",
         "training_lab": "multi-position-enabled",
         "lona_validation": "panel-enabled",
+        "cross_engine_comparison": "our-model-vs-lona-enabled",
     }
 
 
