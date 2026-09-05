@@ -25,6 +25,16 @@ def test_decision_is_explainable() -> None:
     assert len(response.safety) >= 3
 
 
+def test_decision_exposes_bridge_live_risk_and_reward_ratio() -> None:
+    config = StrategyConfig()
+    config.safety.risk_percent = 0.35
+    config.safety.reward_risk_ratio = 2.5
+    response = build_decision(snapshot(), config)
+
+    assert response.risk_percent == 0.35
+    assert response.reward_risk_ratio == 2.5
+
+
 def test_edge_gate_keeps_leading_candidate_explainable() -> None:
     config = StrategyConfig()
     config.decision.min_side_edge = 100.0
