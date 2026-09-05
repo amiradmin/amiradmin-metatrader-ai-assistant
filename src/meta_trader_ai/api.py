@@ -21,8 +21,10 @@ from .models import (
     TradeOutcome,
 )
 from .performance import PerformanceStore
+from .training import TrainingRequest, train_thresholds
+from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.2.2")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.0")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
@@ -36,6 +38,7 @@ def health() -> dict[str, str]:
         "engine": "six-factor-explainable",
         "execution": "mt5-demo-guarded",
         "historical_replay": "enabled",
+        "training_lab": "enabled",
     }
 
 
@@ -128,6 +131,29 @@ def date_backtest(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/training/run")
+def run_training(request: TrainingRequest) -> dict[str, object]:
+    history = history_store.load(request.symbol, request.timeframe)
+    point = history_store.point(request.symbol, request.timeframe)
+    if not history or point is None:
+        raise HTTPException(status_code=409, detail="No MT5 history synced yet. Keep the EA attached and wait for history sync.")
+    base_config = StrategyConfig() if request.base_profile == "MODEL_BASELINE" else config_store.load()
+    try:
+        return train_thresholds(
+            history=history,
+            point=point,
+            request=request,
+            base_config=base_config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/train", response_class=HTMLResponse)
+def training_page() -> str:
+    return training_page_html()
+
+
 @app.post("/performance/trades", response_model=PerformanceSummary)
 def record_trade(outcome: TradeOutcome) -> PerformanceSummary:
     performance_store.append(outcome)
@@ -158,6 +184,7 @@ def control_panel() -> str:
 <body><div class="wrap">
 <h1>MetaTrader AI v2 — Bridge Control</h1>
 <p class="muted">Live thresholds plus historical M15 replay from bars synced automatically by the MT5 EA.</p>
+<p><a href="/train" style="color:#bfdbfe;text-decoration:none;border:1px solid #374151;border-radius:10px;padding:9px 12px;display:inline-block">Open Training Lab →</a></p>
 <div class="card" id="factors"></div>
 <div class="card"><h2>Decision gates</h2><div class="row"><label>Minimum passed factors</label><input id="min_pass_count" type="range" min="1" max="6"><input id="min_pass_count_n" type="number" min="1" max="6"></div><div class="row"><label>Minimum total score</label><input id="min_total_score" type="range" min="0" max="100"><input id="min_total_score_n" type="number" min="0" max="100"></div><div class="row"><label>Minimum BUY/SELL edge</label><input id="min_side_edge" type="range" min="0" max="100"><input id="min_side_edge_n" type="number" min="0" max="100"></div></div>
 <button id="saveBtn">Save live thresholds</button> <span id="status"></span>
