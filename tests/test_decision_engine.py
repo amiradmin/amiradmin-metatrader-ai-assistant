@@ -25,6 +25,23 @@ def test_decision_is_explainable() -> None:
     assert len(response.safety) >= 3
 
 
+def test_edge_gate_keeps_leading_candidate_explainable() -> None:
+    config = StrategyConfig()
+    config.decision.min_side_edge = 100.0
+    response = build_decision(snapshot(), config)
+
+    assert response.decision.value == "WAIT"
+    assert response.candidate.value in {"BUY", "SELL"}
+    assert response.candidate.value != "WAIT"
+    assert response.primary_blocker is not None
+    assert response.primary_blocker.startswith("side edge")
+
+    for factor in response.factors:
+        expected = factor.buy_score if response.candidate.value == "BUY" else factor.sell_score
+        assert factor.candidate_score == expected
+        assert factor.passed == (factor.candidate_score >= factor.min_score)
+
+
 def test_real_account_is_blocked_by_default() -> None:
     s = snapshot()
     s.account_mode = "REAL"
