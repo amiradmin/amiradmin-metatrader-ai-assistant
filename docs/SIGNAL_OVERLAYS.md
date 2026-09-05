@@ -31,7 +31,7 @@ Do not put credentials in Git or in `strategy_config.json`.
 
 ## Order-flow proxy
 
-The local order-flow overlay uses VWAP, a directional activity/CVD proxy and a volume-profile-style POC estimate. If a future MT5 snapshot supplies `tick_volume`, it uses that. With the current older snapshot format it falls back to candle-range activity and clearly labels the result as an `OHLC activity proxy`.
+The local order-flow overlay uses VWAP, a directional activity/CVD proxy and a volume-profile-style POC estimate. EA v0.24 sends each completed M15 bar's MT5 `tick_volume` in the live snapshot, so the overlay uses broker tick activity when v0.24 is installed. Older EA snapshots remain compatible and fall back to candle-range activity, clearly labeled as an `OHLC activity proxy`.
 
 This is an independent implementation. It is not a copy of a TradingView script and is not a claim of centralized order-book data for spot XAUUSD.
 
