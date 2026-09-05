@@ -189,6 +189,7 @@ def range_backtest(
     risk_percent: float = Query(0.5, gt=0, le=5.0),
     reward_risk_ratio: float = Query(2.0, ge=0.5, le=10.0),
     max_open_trades: int = Query(1, ge=1, le=5),
+    profile: str = Query("CURRENT", pattern=r"^(CURRENT|MODEL_BASELINE)$"),
 ) -> RangeBacktestSummary:
     if start_date > end_date:
         raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
@@ -202,6 +203,7 @@ def range_backtest(
     point = history_store.point(symbol, timeframe)
     if not history or point is None:
         raise HTTPException(status_code=409, detail="No MT5 history synced for this range.")
+    config = StrategyConfig() if profile == "MODEL_BASELINE" else config_store.load()
     try:
         return run_range_backtest(
             history=history,
@@ -210,7 +212,7 @@ def range_backtest(
             end_date=end_date,
             symbol=symbol,
             timeframe=timeframe,
-            config=config_store.load(),
+            config=config,
             settings=ReplaySettings(
                 starting_balance=starting_balance,
                 risk_percent=risk_percent,
