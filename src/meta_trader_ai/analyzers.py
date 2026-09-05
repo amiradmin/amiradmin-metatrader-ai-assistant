@@ -16,6 +16,12 @@ class RawFactorScore:
     sell_reason: str
 
 
+@dataclass(frozen=True)
+class MarketRegime:
+    trend_strength_atr: float
+    atr_ratio: float
+
+
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, value))
 
@@ -63,6 +69,38 @@ def rsi(values: list[float], period: int = 14) -> list[float]:
 def _series(snapshot: MarketSnapshot) -> tuple[list[float], list[float], list[float], list[float]]:
     bars = sorted(snapshot.bars, key=lambda b: b.time)
     return [b.open for b in bars], [b.high for b in bars], [b.low for b in bars], [b.close for b in bars]
+
+
+def market_regime(snapshot: MarketSnapshot) -> MarketRegime:
+    """Return scale-free trend and volatility regime measurements.
+
+    trend_strength_atr is the EMA20/EMA50 separation measured in current ATRs.
+    atr_ratio compares the recent ATR14 with a slower 60-bar true-range mean.
+    Values below ~1 on atr_ratio indicate quieter-than-baseline conditions.
+    """
+    _, highs, lows, closes = _series(snapshot)
+    current_atr = max(atr(highs, lows, closes, 14), snapshot.point * 10)
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
+    trend_strength = abs(e20[-1] - e50[-1]) / current_atr if e20 and e50 else 0.0
+
+    trs: list[float] = []
+    for i in range(1, len(closes)):
+        trs.append(
+            max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+        )
+    baseline_window = trs[-60:] if trs else []
+    baseline_tr = sum(baseline_window) / len(baseline_window) if baseline_window else current_atr
+    baseline_tr = max(baseline_tr, snapshot.point * 10)
+    atr_ratio = current_atr / baseline_tr
+    return MarketRegime(
+        trend_strength_atr=round(trend_strength, 4),
+        atr_ratio=round(atr_ratio, 4),
+    )
 
 
 def dynamic_levels(snapshot: MarketSnapshot) -> RawFactorScore:
