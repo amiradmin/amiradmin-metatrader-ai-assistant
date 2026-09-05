@@ -24,8 +24,26 @@ def test_control_page_has_persian_parameter_tooltips() -> None:
     assert "const paramTips" in html
     assert "حداقل تعداد فاکتورهایی" in html
     assert "حداکثر تعداد پوزیشن‌های هم‌زمان" in html
+    assert "درصد Equity" in html
     assert "function attachTooltips()" in html
     assert 'className=\'tip\'' in html
+
+
+def test_control_page_has_one_click_research_candidate() -> None:
+    html = control_page_html()
+
+    assert 'id="researchPresetBtn"' in html
+    assert "function applyResearchPreset()" in html
+    assert "dynamic_levels:55" in html
+    assert "static_levels:50" in html
+    assert "setBound('min_pass_count',2)" in html
+    assert "setBound('min_total_score',43)" in html
+    assert "setBound('min_side_edge',7)" in html
+    assert "setBound('max_open_trades',1)" in html
+    assert "setBound('risk_percent',0.5)" in html
+    assert "setBound('reward_risk_ratio',2)" in html
+    assert 'id="risk_percent"' in html
+    assert 'id="reward_risk_ratio"' in html
 
 
 def test_training_page_has_tooltips_and_cross_period_stability() -> None:
