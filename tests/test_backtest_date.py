@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from meta_trader_ai.backtest_date import ReplaySettings, run_date_backtest
+from meta_trader_ai.backtest_date import ReplaySettings, run_date_backtest, run_range_backtest
 from meta_trader_ai.history import HistoryStore
 from meta_trader_ai.models import HistoryBar, HistorySync, StrategyConfig
 
@@ -132,3 +132,30 @@ def test_date_backtest_returns_trade_summary() -> None:
     assert result.signals >= result.trades
     assert result.trades == result.buy_trades + result.sell_trades
     assert result.ending_balance == round(result.starting_balance + result.estimated_pnl_money, 2)
+
+
+def test_range_backtest_keeps_position_open_across_days() -> None:
+    result = run_range_backtest(
+        history=make_history(),
+        point=0.01,
+        start_date="2026-09-02",
+        end_date="2026-09-04",
+        symbol="XAUUSD_o",
+        timeframe="M15",
+        config=permissive_config(),
+        settings=ReplaySettings(
+            starting_balance=1000,
+            risk_percent=0.5,
+            reward_risk_ratio=2.0,
+            min_stop_points=100_000,
+            max_stop_points=100_000,
+            max_open_trades=1,
+        ),
+    )
+
+    assert result.trading_days == 3
+    assert result.trades >= 1
+    assert all(trade.outcome != "DAY_CLOSE" for trade in result.trades_detail)
+    assert result.trades_detail[-1].outcome == "RANGE_CLOSE"
+    assert result.trades_detail[-1].exit_time > result.trades_detail[-1].entry_time
+    assert result.max_drawdown_percent >= 0
