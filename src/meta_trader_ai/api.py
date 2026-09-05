@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .backtest_date import ReplaySettings, run_date_backtest, run_range_backtest
 from .config_store import StrategyConfigStore
+from .control_extensions import inject_forex_factory_control
 from .control_page import control_page_html
 from .decision_engine import build_decision
 from .external_signals import ExternalSignalHub
@@ -24,17 +25,20 @@ from .models import (
     StrategyConfig,
     TradeOutcome,
 )
+from .news_calendar import ForexFactoryCalendar, NewsSourceStore
 from .performance import PerformanceStore
 from .training import TrainingRequest, train_thresholds
 from .training_page import training_page_html
 
-app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.5")
+app = FastAPI(title="MetaTrader AI Assistant v2", version="0.3.6")
 config_store = StrategyConfigStore()
 performance_store = PerformanceStore()
 decision_journal = DecisionJournal()
 history_store = HistoryStore()
 lona_store = LonaReportStore()
 signal_hub = ExternalSignalHub()
+news_source_store = NewsSourceStore()
+forex_factory_calendar = ForexFactoryCalendar()
 
 
 @app.get("/health")
@@ -48,6 +52,7 @@ def health() -> dict[str, str]:
         "lona_validation": "panel-enabled",
         "cross_engine_comparison": "continuous-parity-enabled",
         "signal_overlays": "optional-live-modifiers-enabled",
+        "news_calendar": "optional-forex-factory-live-risk-enabled",
     }
 
 
@@ -64,6 +69,22 @@ def put_strategy_config(config: StrategyConfig) -> StrategyConfig:
 @app.get("/integrations/status")
 def integrations_status() -> dict[str, dict[str, object]]:
     return signal_hub.status(config_store.load())
+
+
+@app.get("/news/sources")
+def get_news_sources() -> dict[str, bool]:
+    return news_source_store.load()
+
+
+@app.put("/news/sources")
+def put_news_sources(payload: dict[str, object] = Body(...)) -> dict[str, bool]:
+    return news_source_store.save(payload)
+
+
+@app.get("/news/status")
+def news_status() -> dict[str, object]:
+    enabled = news_source_store.load()["forex_factory_enabled"]
+    return forex_factory_calendar.status(enabled)
 
 
 def _recommended_payload() -> dict[str, object]:
@@ -104,14 +125,30 @@ def apply_recommended_strategy() -> StrategyConfig:
 @app.post("/analyze", response_model=DecisionResponse)
 def analyze(snapshot: MarketSnapshot) -> DecisionResponse:
     config = config_store.load()
-    overlays = signal_hub.collect(snapshot, config)
+    live_snapshot = snapshot
+    news_assessment = None
+    if news_source_store.load()["forex_factory_enabled"]:
+        news_assessment = forex_factory_calendar.assess(snapshot)
+        live_snapshot = snapshot.model_copy(update={"news_risk": news_assessment.risk})
+
+    overlays = signal_hub.collect(live_snapshot, config)
     response = build_decision(
-        snapshot,
+        live_snapshot,
         config,
         performance_store.summary(),
         overlays=overlays,
     )
-    decision_journal.append(response.model_dump(mode="json"))
+    journal_payload = response.model_dump(mode="json")
+    if news_assessment is not None:
+        journal_payload["news_context"] = {
+            "source": news_assessment.source,
+            "available": news_assessment.available,
+            "risk": news_assessment.risk,
+            "reason": news_assessment.reason,
+            "observed_at": news_assessment.observed_at,
+            "next_event": news_assessment.next_event,
+        }
+    decision_journal.append(journal_payload)
     return response
 
 
@@ -282,4 +319,4 @@ def learning_recommendation() -> LearningRecommendation:
 
 @app.get("/control", response_class=HTMLResponse)
 def control_panel() -> str:
-    return control_page_html()
+    return inject_forex_factory_control(control_page_html())
