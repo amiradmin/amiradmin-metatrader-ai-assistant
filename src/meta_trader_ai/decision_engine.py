@@ -18,13 +18,6 @@ def _weighted_side_score(raw: list[RawFactorScore], config: StrategyConfig, side
 
 
 def _candidate_from_scores(buy_score: float, sell_score: float) -> Decision:
-    """Return the leading direction even when the edge is not yet tradable.
-
-    The minimum edge is an execution gate, not a candidate-selection rule. Keeping
-    the leading side visible means factor PASS/FAIL values on the MT5 tree are
-    evaluated against one consistent direction instead of forcing every factor to
-    FAIL whenever the final decision is WAIT because the edge is too small.
-    """
     if buy_score > sell_score:
         return Decision.BUY
     if sell_score > buy_score:
@@ -51,6 +44,7 @@ def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance
     factors: list[FactorScore] = []
     passed_count = 0
     required_failed: list[str] = []
+
     for item in raw:
         fc = config.factor(item.name)
         if candidate == Decision.BUY:
@@ -64,7 +58,18 @@ def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance
             passed_count += 1
         if fc.required and not passed:
             required_failed.append(item.label)
-        factors.append(FactorScore(name=item.name, label=item.label, buy_score=round(item.buy, 2), sell_score=round(item.sell, 2), min_score=fc.min_score, weight=fc.weight, required=fc.required, candidate_score=round(score, 2), passed=passed, reason=reason))
+        factors.append(FactorScore(
+            name=item.name,
+            label=item.label,
+            buy_score=round(item.buy, 2),
+            sell_score=round(item.sell, 2),
+            min_score=fc.min_score,
+            weight=fc.weight,
+            required=fc.required,
+            candidate_score=round(score, 2),
+            passed=passed,
+            reason=reason,
+        ))
 
     safety = _safety(snapshot, config)
     blockers: list[str] = []
@@ -89,4 +94,23 @@ def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance
     newest_bar_time = max(b.time for b in snapshot.bars)
     signal_id = f"{snapshot.symbol}_{snapshot.timeframe}_{newest_bar_time}_{candidate.value}"
     trade_allowed = decision in (Decision.BUY, Decision.SELL) and all(g.passed for g in safety)
-    return DecisionResponse(signal_id=signal_id, generated_at=datetime.now(timezone.utc), symbol=snapshot.symbol, timeframe=snapshot.timeframe, candidate=candidate, decision=decision, trade_allowed=trade_allowed, buy_score=round(buy_score, 2), sell_score=round(sell_score, 2), side_edge=round(side_edge, 2), passed_count=passed_count, min_pass_count=config.decision.min_pass_count, blockers=blockers, primary_blocker=blockers[0] if blockers else None, factors=factors, safety=safety, performance=performance or PerformanceSummary())
+    return DecisionResponse(
+        signal_id=signal_id,
+        generated_at=datetime.now(timezone.utc),
+        symbol=snapshot.symbol,
+        timeframe=snapshot.timeframe,
+        candidate=candidate,
+        decision=decision,
+        trade_allowed=trade_allowed,
+        buy_score=round(buy_score, 2),
+        sell_score=round(sell_score, 2),
+        side_edge=round(side_edge, 2),
+        passed_count=passed_count,
+        min_pass_count=config.decision.min_pass_count,
+        max_open_trades=config.safety.max_open_trades,
+        blockers=blockers,
+        primary_blocker=blockers[0] if blockers else None,
+        factors=factors,
+        safety=safety,
+        performance=performance or PerformanceSummary(),
+    )
