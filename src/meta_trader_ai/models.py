@@ -42,6 +42,10 @@ class SafetyConfig(BaseModel):
     # Bridge-side execution ceiling. The EA also has a local MaxOpenTrades hard
     # ceiling, so the effective live limit is min(local ceiling, this value).
     max_open_trades: int = Field(1, ge=1, le=5)
+    # Live execution sizing sent to the EA with each decision. The EA keeps its
+    # local inputs as backward-compatible fallbacks when these fields are absent.
+    risk_percent: float = Field(0.5, gt=0, le=5.0)
+    reward_risk_ratio: float = Field(2.0, ge=0.5, le=10.0)
 
 
 class StrategyConfig(BaseModel):
@@ -136,6 +140,8 @@ class DecisionResponse(BaseModel):
     passed_count: int
     min_pass_count: int
     max_open_trades: int = Field(1, ge=1, le=5)
+    risk_percent: float = Field(0.5, gt=0, le=5.0)
+    reward_risk_ratio: float = Field(2.0, ge=0.5, le=10.0)
     blockers: list[str]
     primary_blocker: str | None = None
     factors: list[FactorScore]
