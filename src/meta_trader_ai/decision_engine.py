@@ -3,7 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from .analyzers import RawFactorScore, analyze_all, market_regime
-from .models import Decision, DecisionResponse, FactorScore, MarketSnapshot, PerformanceSummary, SafetyGate, StrategyConfig
+from .models import (
+    Decision,
+    DecisionResponse,
+    FactorScore,
+    MarketSnapshot,
+    PerformanceSummary,
+    SafetyGate,
+    SignalOverlay,
+    StrategyConfig,
+)
 
 
 def _weighted_side_score(raw: list[RawFactorScore], config: StrategyConfig, side: Decision) -> float:
@@ -56,10 +65,37 @@ def _safety(snapshot: MarketSnapshot, config: StrategyConfig) -> list[SafetyGate
     return gates
 
 
-def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance: PerformanceSummary | None = None) -> DecisionResponse:
+def _apply_overlays(
+    base_buy: float,
+    base_sell: float,
+    overlays: list[SignalOverlay],
+) -> tuple[float, float, float, float]:
+    """Apply bounded live modifiers without allowing overlays to dominate factors."""
+
+    buy_modifier = sum(item.buy_modifier for item in overlays if item.available)
+    sell_modifier = sum(item.sell_modifier for item in overlays if item.available)
+    buy_modifier = max(-10.0, min(10.0, buy_modifier))
+    sell_modifier = max(-10.0, min(10.0, sell_modifier))
+    buy_score = max(0.0, min(100.0, base_buy + buy_modifier))
+    sell_score = max(0.0, min(100.0, base_sell + sell_modifier))
+    return buy_score, sell_score, buy_modifier, sell_modifier
+
+
+def build_decision(
+    snapshot: MarketSnapshot,
+    config: StrategyConfig,
+    performance: PerformanceSummary | None = None,
+    overlays: list[SignalOverlay] | None = None,
+) -> DecisionResponse:
     raw = analyze_all(snapshot)
-    buy_score = _weighted_side_score(raw, config, Decision.BUY)
-    sell_score = _weighted_side_score(raw, config, Decision.SELL)
+    base_buy_score = _weighted_side_score(raw, config, Decision.BUY)
+    base_sell_score = _weighted_side_score(raw, config, Decision.SELL)
+    active_overlays = overlays or []
+    buy_score, sell_score, overlay_buy, overlay_sell = _apply_overlays(
+        base_buy_score,
+        base_sell_score,
+        active_overlays,
+    )
     candidate = _candidate_from_scores(buy_score, sell_score)
     factors: list[FactorScore] = []
     passed_count = 0
@@ -130,6 +166,11 @@ def build_decision(snapshot: MarketSnapshot, config: StrategyConfig, performance
         max_open_trades=config.safety.max_open_trades,
         risk_percent=config.safety.risk_percent,
         reward_risk_ratio=config.safety.reward_risk_ratio,
+        base_buy_score=round(base_buy_score, 2),
+        base_sell_score=round(base_sell_score, 2),
+        overlay_buy_modifier=round(overlay_buy, 2),
+        overlay_sell_modifier=round(overlay_sell, 2),
+        overlays=active_overlays,
         blockers=blockers,
         primary_blocker=blockers[0] if blockers else None,
         factors=factors,
