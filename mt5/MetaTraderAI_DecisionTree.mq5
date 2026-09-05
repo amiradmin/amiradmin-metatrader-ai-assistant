@@ -1,6 +1,6 @@
 #property strict
-#property version   "0.22"
-#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge concurrency control and historical replay sync"
+#property version   "0.23"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge concurrency/risk control and historical replay sync"
 
 #include <Trade/Trade.mqh>
 
@@ -16,6 +16,7 @@ input int HistoryInitialRetrySeconds = 10;
 
 input bool EnableAutoTrading = true;
 input bool DemoOnly = true;
+// Backward-compatible fallbacks. EA v0.23+ normally receives these from Bridge /control.
 input double RiskPercent = 0.50;
 input double RewardRiskRatio = 2.0;
 // Local hard ceiling. Bridge /control can choose 1..5, but can never exceed this.
@@ -180,6 +181,18 @@ int EffectiveMaxOpenTrades(const string json)
    bridge_max=MathMax(1,MathMin(5,bridge_max));
    int local_max=MathMax(1,MathMin(5,MaxOpenTrades));
    return MathMin(local_max,bridge_max);
+}
+
+double EffectiveRiskPercent(const string json)
+{
+   double value=JsonNumber(json,"risk_percent",RiskPercent);
+   return MathMax(0.05,MathMin(5.0,value));
+}
+
+double EffectiveRewardRiskRatio(const string json)
+{
+   double value=JsonNumber(json,"reward_risk_ratio",RewardRiskRatio);
+   return MathMax(0.5,MathMin(10.0,value));
 }
 
 string FactorObject(const string json, const string factor_name)
@@ -392,6 +405,8 @@ void DrawDecisionPanel(const string json)
    int min_pass = (int)JsonNumber(json,"min_pass_count",4);
    int bridge_max = MathMax(1,MathMin(5,(int)JsonNumber(json,"max_open_trades",1)));
    int effective_max = EffectiveMaxOpenTrades(json);
+   double effective_risk = EffectiveRiskPercent(json);
+   double effective_rr = EffectiveRewardRiskRatio(json);
    bool bridge_allowed = JsonBool(json,"trade_allowed",false);
    bool market_open = MarketSessionOpenNow();
    bool algo_ready = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED);
@@ -454,7 +469,7 @@ void DrawDecisionPanel(const string json)
    else if(bridge_allowed && !demo_ready) blocker="DemoOnly=true but account is not DEMO";
    SetPanelText("WHY",blocker=="" ? "WHY: all decision + local execution gates passed" : "WHY: "+blocker,14,375,blocker=="" ? clrLime : clrTomato,PanelFontSize-1);
    SetPanelText("CFG","Thresholds + replay: Bridge /control | History="+HistorySyncState,14,400,HistorySyncState=="SYNCED"?clrSilver:clrGold,PanelFontSize-1);
-   SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | MaxOpen="+IntegerToString(effective_max)+" (B"+IntegerToString(bridge_max)+"/L"+IntegerToString(MaxOpenTrades)+") | risk="+DoubleToString(RiskPercent,2)+"% | RR=1:"+DoubleToString(RewardRiskRatio,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
+   SetPanelText("SAFE","Session="+(market_open?"OPEN":"CLOSED")+" | MaxOpen="+IntegerToString(effective_max)+" (B"+IntegerToString(bridge_max)+"/L"+IntegerToString(MaxOpenTrades)+") | risk="+DoubleToString(effective_risk,2)+"% | RR=1:"+DoubleToString(effective_rr,1),14,425,market_open?clrSilver:clrTomato,PanelFontSize-1);
    ChartRedraw();
 }
 
@@ -487,7 +502,7 @@ double NormalizeVolumeDown(double volume)
    return NormalizeDouble(volume,digits);
 }
 
-bool BuildTradePlan(const string side, double &stop, double &target, double &volume, double &risk_money)
+bool BuildTradePlan(const string side, const double risk_percent, const double reward_risk_ratio, double &stop, double &target, double &volume, double &risk_money)
 {
    MqlTick tick;
    if(!SymbolInfoTick(TradeSymbol,tick)) return false;
@@ -505,19 +520,19 @@ bool BuildTradePlan(const string side, double &stop, double &target, double &vol
    if(side == "BUY")
    {
       stop = NormalizeDouble(entry-stop_points*point,digits);
-      target = NormalizeDouble(entry+stop_points*RewardRiskRatio*point,digits);
+      target = NormalizeDouble(entry+stop_points*reward_risk_ratio*point,digits);
    }
    else
    {
       stop = NormalizeDouble(entry+stop_points*point,digits);
-      target = NormalizeDouble(entry-stop_points*RewardRiskRatio*point,digits);
+      target = NormalizeDouble(entry-stop_points*reward_risk_ratio*point,digits);
    }
    ENUM_ORDER_TYPE type = side == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double one_lot_profit=0.0;
    if(!OrderCalcProfit(type,TradeSymbol,1.0,entry,stop,one_lot_profit)) return false;
    double one_lot_loss=MathAbs(one_lot_profit);
    if(one_lot_loss<=0) return false;
-   double target_risk=AccountInfoDouble(ACCOUNT_EQUITY)*RiskPercent/100.0;
+   double target_risk=AccountInfoDouble(ACCOUNT_EQUITY)*risk_percent/100.0;
    volume=NormalizeVolumeDown(target_risk/one_lot_loss);
    if(volume<=0) return false;
    double actual_loss=0.0;
@@ -541,9 +556,11 @@ void MaybeExecute(const string json)
    if(completed_bar<=0 || completed_bar<=LastExecutedBarTime) return;
    int effective_max=EffectiveMaxOpenTrades(json);
    if(ManagedOpenPositions() >= effective_max) return;
+   double effective_risk=EffectiveRiskPercent(json);
+   double effective_rr=EffectiveRewardRiskRatio(json);
 
    double stop=0,target=0,volume=0,risk_money=0;
-   if(!BuildTradePlan(side,stop,target,volume,risk_money))
+   if(!BuildTradePlan(side,effective_risk,effective_rr,stop,target,volume,risk_money))
    {
       Print("MetaTraderAI: trade plan failed; no order sent.");
       return;
@@ -572,7 +589,7 @@ void MaybeExecute(const string json)
       if(position_id>0)
          GlobalVariableSet(PositionRiskGlobalName(position_id),risk_money);
    }
-   Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2)," maxOpen=",effective_max);
+   Print("MetaTraderAI OPENED ",side," signal=",signal_id," volume=",DoubleToString(volume,3)," risk=$",DoubleToString(risk_money,2)," riskPct=",DoubleToString(effective_risk,2)," RR=",DoubleToString(effective_rr,1)," maxOpen=",effective_max);
 }
 
 string EntrySignalForPosition(const long position_id)
