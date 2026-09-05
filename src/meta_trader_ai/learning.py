@@ -42,3 +42,30 @@ def recommend_thresholds(config: StrategyConfig, outcomes: list[TradeOutcome], j
                 reasons.append(f"{factor_name.value}: near-below-threshold expectancy {e_below:+.2f}R beats pass-zone {e_above:+.2f}R; candidate -5.")
 
     return LearningRecommendation(sample_size=len(outcomes), status="CANDIDATE_AVAILABLE" if proposed else "NO_CHANGE", current_expectancy_r=current_expectancy, proposed_thresholds=proposed, reasons=reasons or ["No threshold change has enough forward evidence yet."])
+
+
+def model_recommended_config(
+    outcomes: list[TradeOutcome],
+    journal: DecisionJournal,
+    *,
+    min_samples: int = 30,
+) -> tuple[StrategyConfig, LearningRecommendation, str]:
+    """Return a stable one-click profile independent from manual slider edits.
+
+    The canonical baseline is the StrategyConfig default profile. Once enough
+    closed forward trades exist, only data-supported factor threshold changes
+    are overlaid on that baseline. Risk settings are deliberately not changed
+    here; the recommendation button is for signal quality, not risk escalation.
+    """
+
+    recommended = StrategyConfig()
+    learning = recommend_thresholds(recommended, outcomes, journal, min_samples=min_samples)
+
+    source = "MODEL_BASELINE"
+    if learning.status == "CANDIDATE_AVAILABLE":
+        for name, value in learning.proposed_thresholds.items():
+            if name in {factor.value for factor in FactorName}:
+                getattr(recommended, name).min_score = value
+        source = "LEARNED_OVERLAY"
+
+    return recommended, learning, source
