@@ -96,6 +96,19 @@ class DailyContext(BaseModel):
     close: float
 
 
+class LivePosition(BaseModel):
+    """Open position owned by the MetaTrader AI EA."""
+
+    ticket: int = Field(ge=0)
+    side: Literal["BUY", "SELL"]
+    volume: float = Field(gt=0)
+    price_open: float = Field(gt=0)
+    stop_loss: float = Field(ge=0)
+    take_profit: float = Field(ge=0)
+    current_price: float = Field(gt=0)
+    profit: float = 0.0
+
+
 class MarketSnapshot(BaseModel):
     symbol: str
     timeframe: str = "M15"
@@ -104,9 +117,16 @@ class MarketSnapshot(BaseModel):
     point: float = Field(gt=0)
     spread_points: int = Field(ge=0)
     bars: list[Bar] = Field(min_length=60)
+    live_bar: Bar | None = None
     previous_day: DailyContext | None = None
     news_risk: Literal["LOW", "MEDIUM", "HIGH", "UNKNOWN"] = "UNKNOWN"
     account_mode: Literal["DEMO", "REAL", "CONTEST", "UNKNOWN"] = "UNKNOWN"
+    account_balance: float | None = Field(default=None, ge=0)
+    account_equity: float | None = Field(default=None, ge=0)
+    market_session_open: bool | None = None
+    terminal_trade_allowed: bool | None = None
+    mql_trade_allowed: bool | None = None
+    positions: list[LivePosition] = Field(default_factory=list)
 
 
 class FactorScore(BaseModel):
