@@ -1,6 +1,6 @@
 #property strict
-#property version   "0.24"
-#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, bridge controls, live tick-volume context and historical replay sync"
+#property version   "0.25"
+#property description "Six-factor explainable MT5 decision tree with guarded DEMO auto-execution, live dashboard telemetry and historical replay sync"
 
 #include <Trade/Trade.mqh>
 
@@ -235,6 +235,10 @@ bool BuildSnapshotJson(string &payload)
    if(copied < 60)
       return false;
 
+   MqlRates live_rates[];
+   ArraySetAsSeries(live_rates, true);
+   int live_copied = CopyRates(TradeSymbol, AnalysisTimeframe, 0, 1, live_rates);
+
    double point = SymbolInfoDouble(TradeSymbol, SYMBOL_POINT);
    if(point <= 0) return false;
    long spread = SymbolInfoInteger(TradeSymbol, SYMBOL_SPREAD);
@@ -252,6 +256,46 @@ bool BuildSnapshotJson(string &payload)
    payload += "\"spread_points\":" + IntegerToString((int)spread) + ",";
    payload += "\"news_risk\":\"UNKNOWN\",";
    payload += "\"account_mode\":\"" + AccountModeText() + "\",";
+   payload += "\"account_balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2) + ",";
+   payload += "\"account_equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2) + ",";
+   payload += "\"market_session_open\":" + (MarketSessionOpenNow()?"true":"false") + ",";
+   payload += "\"terminal_trade_allowed\":" + (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)?"true":"false") + ",";
+   payload += "\"mql_trade_allowed\":" + (MQLInfoInteger(MQL_TRADE_ALLOWED)?"true":"false") + ",";
+
+   if(live_copied > 0)
+   {
+      payload += "\"live_bar\":{";
+      payload += "\"time\":" + IntegerToString((int)live_rates[0].time) + ",";
+      payload += "\"open\":" + DoubleToString(live_rates[0].open,_Digits) + ",";
+      payload += "\"high\":" + DoubleToString(live_rates[0].high,_Digits) + ",";
+      payload += "\"low\":" + DoubleToString(live_rates[0].low,_Digits) + ",";
+      payload += "\"close\":" + DoubleToString(live_rates[0].close,_Digits) + ",";
+      payload += "\"tick_volume\":" + IntegerToString((int)live_rates[0].tick_volume) + "},";
+   }
+
+   payload += "\"positions\":[";
+   bool first_position = true;
+   for(int p=PositionsTotal()-1; p>=0; p--)
+   {
+      ulong ticket = PositionGetTicket(p);
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=TradeSymbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      ENUM_POSITION_TYPE position_type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if(!first_position) payload += ",";
+      first_position = false;
+      payload += "{";
+      payload += "\"ticket\":" + StringFormat("%I64u",ticket) + ",";
+      payload += "\"side\":\"" + (position_type==POSITION_TYPE_BUY?"BUY":"SELL") + "\",";
+      payload += "\"volume\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME),4) + ",";
+      payload += "\"price_open\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN),_Digits) + ",";
+      payload += "\"stop_loss\":" + DoubleToString(PositionGetDouble(POSITION_SL),_Digits) + ",";
+      payload += "\"take_profit\":" + DoubleToString(PositionGetDouble(POSITION_TP),_Digits) + ",";
+      payload += "\"current_price\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_CURRENT),_Digits) + ",";
+      payload += "\"profit\":" + DoubleToString(PositionGetDouble(POSITION_PROFIT),2) + "}";
+   }
+   payload += "],";
+
    if(d1h > 0 && d1l > 0 && d1c > 0)
    {
       payload += "\"previous_day\":{";

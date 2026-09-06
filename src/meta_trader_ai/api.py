@@ -12,6 +12,8 @@ from .external_signals import ExternalSignalHub
 from .history import HistoryStore
 from .journal import DecisionJournal
 from .learning import model_recommended_config, recommend_thresholds
+from .live_page import live_page_html
+from .live_state import LiveStateStore
 from .lona_store import LonaReportStore
 from .models import (
     BacktestSummary,
@@ -39,6 +41,7 @@ lona_store = LonaReportStore()
 signal_hub = ExternalSignalHub()
 news_source_store = NewsSourceStore()
 forex_factory_calendar = ForexFactoryCalendar()
+live_state_store = LiveStateStore()
 
 
 @app.get("/health")
@@ -53,6 +56,7 @@ def health() -> dict[str, str]:
         "cross_engine_comparison": "continuous-parity-enabled",
         "signal_overlays": "optional-live-modifiers-enabled",
         "news_calendar": "optional-forex-factory-live-risk-enabled",
+        "live_dashboard": "mt5-snapshot-and-decision-enabled",
     }
 
 
@@ -92,6 +96,7 @@ def _recommended_payload() -> dict[str, object]:
     recommended, learning, source = model_recommended_config(
         performance_store.load(), decision_journal
     )
+    recommended.strategy_mode = current.strategy_mode
     recommended.safety = current.safety.model_copy(deep=True)
     recommended.integrations = current.integrations.model_copy(deep=True)
     return {
@@ -117,6 +122,7 @@ def apply_recommended_strategy() -> StrategyConfig:
     recommended, _, _ = model_recommended_config(
         performance_store.load(), decision_journal
     )
+    recommended.strategy_mode = current.strategy_mode
     recommended.safety = current.safety.model_copy(deep=True)
     recommended.integrations = current.integrations.model_copy(deep=True)
     return config_store.save(recommended)
@@ -138,6 +144,7 @@ def analyze(snapshot: MarketSnapshot) -> DecisionResponse:
         performance_store.summary(),
         overlays=overlays,
     )
+    live_state_store.update(live_snapshot, response)
     journal_payload = response.model_dump(mode="json")
     if news_assessment is not None:
         journal_payload["news_context"] = {
@@ -150,6 +157,16 @@ def analyze(snapshot: MarketSnapshot) -> DecisionResponse:
         }
     decision_journal.append(journal_payload)
     return response
+
+
+@app.get("/live/data")
+def live_data() -> dict[str, object]:
+    return live_state_store.payload()
+
+
+@app.get("/live", response_class=HTMLResponse)
+def live_dashboard() -> str:
+    return live_page_html()
 
 
 @app.post("/history/sync", response_model=HistoryStatus)
