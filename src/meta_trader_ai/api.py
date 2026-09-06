@@ -92,6 +92,7 @@ def _recommended_payload() -> dict[str, object]:
     recommended, learning, source = model_recommended_config(
         performance_store.load(), decision_journal
     )
+    recommended.strategy_mode = current.strategy_mode
     recommended.safety = current.safety.model_copy(deep=True)
     recommended.integrations = current.integrations.model_copy(deep=True)
     return {
@@ -117,6 +118,7 @@ def apply_recommended_strategy() -> StrategyConfig:
     recommended, _, _ = model_recommended_config(
         performance_store.load(), decision_journal
     )
+    recommended.strategy_mode = current.strategy_mode
     recommended.safety = current.safety.model_copy(deep=True)
     recommended.integrations = current.integrations.model_copy(deep=True)
     return config_store.save(recommended)
