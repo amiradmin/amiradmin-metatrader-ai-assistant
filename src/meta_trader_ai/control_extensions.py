@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def inject_forex_factory_control(html: str) -> str:
-    """Add live news controls plus the independent PDF strategy-mode toggle."""
+    """Add live news controls, PDF mode, and robust mixed-direction tooltips."""
 
     marker = '<p class="actions"><button id="saveBtn">'
     card = r'''
@@ -25,11 +25,15 @@ def inject_forex_factory_control(html: str) -> str:
             '</style>',
             'button.pdfmode{background:#0f766e;box-shadow:0 0 0 1px #34d399 inset}'
             'button.pdfmode.on{background:#16a34a;box-shadow:0 0 0 1px #86efac inset}'
-            '.tip:hover::after,.tip:focus::after{'
-            'width:320px;max-width:min(340px,calc(100vw - 32px));'
-            'direction:rtl;unicode-bidi:plaintext;text-align:start;'
-            'overflow-wrap:anywhere;word-break:normal;line-height:1.85;'
-            'font-family:system-ui,sans-serif}'
+            '.tip:hover::after,.tip:focus::after,.tip:hover::before,.tip:focus::before{content:none!important;display:none!important}'
+            '.tipbox{display:none;position:absolute;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%);'
+            'width:360px;max-width:min(380px,calc(100vw - 32px));padding:11px 13px;border:1px solid #475569;'
+            'border-radius:10px;background:#020617;color:#f8fafc;font-size:13px;font-weight:500;line-height:1.9;'
+            'direction:rtl;unicode-bidi:isolate;text-align:right;white-space:normal;overflow-wrap:break-word;word-break:normal;'
+            'font-family:system-ui,sans-serif;z-index:10000;box-shadow:0 12px 32px rgba(0,0,0,.45)}'
+            '.tip:hover>.tipbox,.tip:focus>.tipbox{display:block}'
+            '.tipbox bdi{direction:ltr;unicode-bidi:isolate;display:inline;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;'
+            'color:#bfdbfe;font-weight:650;white-space:normal}'
             '</style>',
             1,
         )
@@ -108,4 +112,60 @@ def inject_forex_factory_control(html: str) -> str:
 '''
     if '</body>' in html and 'PDF Mode toggle runtime' not in html:
         html = html.replace('</body>', '<!-- PDF Mode toggle runtime -->' + pdf_script + '</body>', 1)
+
+    tooltip_script = r'''
+<script>
+(function(){
+  const latinRun=/([A-Za-z0-9][A-Za-z0-9_.:+/%=-]*(?:\s+[A-Za-z0-9][A-Za-z0-9_.:+/%=-]*)*)/g;
+
+  function renderMixedDirection(box,text){
+    box.textContent='';
+    let cursor=0;
+    for(const match of text.matchAll(latinRun)){
+      const start=match.index||0;
+      if(start>cursor)box.appendChild(document.createTextNode(text.slice(cursor,start)));
+      const isolate=document.createElement('bdi');
+      isolate.dir='ltr';
+      isolate.textContent=match[0];
+      box.appendChild(isolate);
+      cursor=start+match[0].length;
+    }
+    if(cursor<text.length)box.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+
+  function enhanceTip(tip){
+    if(tip.dataset.mixedBidiReady==='1')return;
+    const text=tip.dataset.tip||'';
+    if(!text)return;
+    tip.dataset.mixedBidiReady='1';
+    const box=document.createElement('span');
+    box.className='tipbox';
+    box.dir='rtl';
+    box.lang='fa';
+    box.setAttribute('role','tooltip');
+    renderMixedDirection(box,text);
+    tip.appendChild(box);
+  }
+
+  function enhanceAll(root=document){
+    if(root.matches&&root.matches('.tip'))enhanceTip(root);
+    if(root.querySelectorAll)root.querySelectorAll('.tip').forEach(enhanceTip);
+  }
+
+  enhanceAll();
+  const observer=new MutationObserver(records=>{
+    for(const record of records){
+      for(const node of record.addedNodes){
+        if(node.nodeType===1)enhanceAll(node);
+      }
+    }
+  });
+  observer.observe(document.documentElement,{childList:true,subtree:true});
+  setTimeout(()=>enhanceAll(),0);
+  setTimeout(()=>enhanceAll(),500);
+})();
+</script>
+'''
+    if '</body>' in html and 'mixed-bidi tooltip runtime' not in html:
+        html = html.replace('</body>', '<!-- mixed-bidi tooltip runtime -->' + tooltip_script + '</body>', 1)
     return html
