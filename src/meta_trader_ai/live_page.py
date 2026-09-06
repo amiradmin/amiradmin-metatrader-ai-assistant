@@ -28,7 +28,7 @@ def live_page_html() -> str:
       <span id="accountBadge" class="badge">ACCOUNT —</span>
     </div>
   </header>
-  <div class="nav"><a href="/control">Control Center</a><a href="/train">Training Lab</a></div>
+  <div class="nav"><a href="/control">Control Center</a><a href="/train">Training Lab</a><a href="/live/data" target="_blank" rel="noopener noreferrer">Open Live JSON ↗</a></div>
 
   <section class="grid">
     <div class="card chart-card">
