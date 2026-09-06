@@ -25,3 +25,18 @@ def test_mt5_execution_is_demo_guarded_by_default() -> None:
     assert "input bool EnableAutoTrading = true;" in source
     assert "input bool DemoOnly = true;" in source
     assert 'if(DemoOnly && AccountModeText() != "DEMO") return;' in source
+
+
+def test_mt5_snapshot_publishes_live_dashboard_telemetry() -> None:
+    source = EA.read_text(encoding="utf-8")
+
+    assert '#property version   "0.25"' in source
+    assert '"\\\"account_balance\\\":"' in source
+    assert '"\\\"account_equity\\\":"' in source
+    assert '"\\\"market_session_open\\\":"' in source
+    assert '"\\\"terminal_trade_allowed\\\":"' in source
+    assert '"\\\"mql_trade_allowed\\\":"' in source
+    assert '"\\\"live_bar\\\":{"' in source
+    assert '"\\\"positions\\\":["' in source
+    assert "POSITION_MAGIC)!=MagicNumber" in source
+    assert '"\\\"profit\\\":"' in source
