@@ -39,15 +39,9 @@ class SafetyConfig(BaseModel):
     block_high_news: bool = True
     block_unknown_news: bool = False
     demo_only: bool = True
-    # Bridge-side execution ceiling. The EA also has a local MaxOpenTrades hard
-    # ceiling, so the effective live limit is min(local ceiling, this value).
     max_open_trades: int = Field(1, ge=1, le=5)
-    # Live execution sizing sent to the EA with each decision. The EA keeps its
-    # local inputs as backward-compatible fallbacks when these fields are absent.
     risk_percent: float = Field(0.5, gt=0, le=5.0)
     reward_risk_ratio: float = Field(2.0, ge=0.5, le=10.0)
-    # Optional research gate for avoiding quiet/sideways market regimes. It is
-    # disabled by default so the frozen v0.1 strategy semantics stay unchanged.
     regime_filter_enabled: bool = False
     regime_min_trend_atr: float = Field(0.20, ge=0.0, le=5.0)
     regime_min_atr_ratio: float = Field(0.85, ge=0.1, le=5.0)
@@ -62,6 +56,9 @@ class IntegrationConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    # Independent workflow selector. Presets such as Ninja change thresholds/risk
+    # but intentionally preserve this field.
+    strategy_mode: Literal["NORMAL", "PDF"] = "NORMAL"
     dynamic_levels: FactorConfig = FactorConfig(min_score=60, weight=1.0, required=True)
     static_levels: FactorConfig = FactorConfig(min_score=50, weight=1.2, required=True)
     fibonacci: FactorConfig = FactorConfig(min_score=45, weight=0.8, required=False)
@@ -82,8 +79,6 @@ class Bar(BaseModel):
     high: float
     low: float
     close: float
-    # Optional for forward compatibility with richer MT5 snapshots. Older EA
-    # versions omit it, in which case order-flow uses a conservative OHLC proxy.
     tick_volume: float = Field(0.0, ge=0)
 
     @model_validator(mode="after")
@@ -160,6 +155,13 @@ class DecisionResponse(BaseModel):
     candidate: Decision
     decision: Decision
     trade_allowed: bool
+    strategy_mode: Literal["NORMAL", "PDF"] = "NORMAL"
+    pdf_status: str = "DISABLED"
+    pdf_regime: str = "UNAVAILABLE"
+    pdf_range_zone: str = "UNAVAILABLE"
+    pdf_breakout_status: str = "UNAVAILABLE"
+    pdf_lower_touch_count: int = Field(0, ge=0)
+    pdf_upper_touch_count: int = Field(0, ge=0)
     buy_score: float
     sell_score: float
     side_edge: float
