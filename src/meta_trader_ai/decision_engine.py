@@ -13,6 +13,7 @@ from .models import (
     SignalOverlay,
     StrategyConfig,
 )
+from .pdf_mode import evaluate_pdf_mode
 
 
 def _weighted_side_score(raw: list[RawFactorScore], config: StrategyConfig, side: Decision) -> float:
@@ -132,6 +133,8 @@ def build_decision(
     decision = candidate
     side_edge = abs(buy_score - sell_score)
 
+    pdf_evaluation = evaluate_pdf_mode(snapshot, candidate) if config.strategy_mode == "PDF" else None
+
     if candidate == Decision.WAIT:
         blockers.append("buy/sell scores are tied; no directional candidate")
     else:
@@ -143,13 +146,34 @@ def build_decision(
         if passed_count < config.decision.min_pass_count:
             blockers.append(f"passed {passed_count}/6 < required {config.decision.min_pass_count}/6")
         blockers.extend(f"required factor failed: {label}" for label in required_failed)
+        if pdf_evaluation is not None and not pdf_evaluation.allowed and pdf_evaluation.reason:
+            blockers.append(pdf_evaluation.reason)
         blockers.extend(g.reason for g in safety if not g.passed)
         if blockers:
             decision = Decision.WAIT
 
     newest_bar_time = max(b.time for b in snapshot.bars)
-    signal_id = f"{snapshot.symbol}_{snapshot.timeframe}_{newest_bar_time}_{candidate.value}"
+    signal_id = (
+        f"{snapshot.symbol}_{snapshot.timeframe}_{newest_bar_time}_"
+        f"{candidate.value}_{config.strategy_mode}"
+    )
     trade_allowed = decision in (Decision.BUY, Decision.SELL) and all(g.passed for g in safety)
+
+    if pdf_evaluation is None:
+        pdf_status = "DISABLED"
+        pdf_regime = "UNAVAILABLE"
+        pdf_range_zone = "UNAVAILABLE"
+        pdf_breakout_status = "UNAVAILABLE"
+        pdf_lower_touch_count = 0
+        pdf_upper_touch_count = 0
+    else:
+        pdf_status = pdf_evaluation.status
+        pdf_regime = pdf_evaluation.regime.value
+        pdf_range_zone = pdf_evaluation.range_zone.value
+        pdf_breakout_status = pdf_evaluation.breakout.value
+        pdf_lower_touch_count = pdf_evaluation.lower_touch_count
+        pdf_upper_touch_count = pdf_evaluation.upper_touch_count
+
     return DecisionResponse(
         signal_id=signal_id,
         generated_at=datetime.now(timezone.utc),
@@ -158,6 +182,13 @@ def build_decision(
         candidate=candidate,
         decision=decision,
         trade_allowed=trade_allowed,
+        strategy_mode=config.strategy_mode,
+        pdf_status=pdf_status,
+        pdf_regime=pdf_regime,
+        pdf_range_zone=pdf_range_zone,
+        pdf_breakout_status=pdf_breakout_status,
+        pdf_lower_touch_count=pdf_lower_touch_count,
+        pdf_upper_touch_count=pdf_upper_touch_count,
         buy_score=round(buy_score, 2),
         sell_score=round(sell_score, 2),
         side_edge=round(side_edge, 2),
