@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def inject_forex_factory_control(html: str) -> str:
-    """Add the Forex Factory calendar control without coupling it to score overlays."""
+    """Add live news controls plus the independent PDF strategy-mode toggle."""
 
     marker = '<p class="actions"><button id="saveBtn">'
     card = r'''
@@ -15,7 +15,21 @@ def inject_forex_factory_control(html: str) -> str:
     if marker in html and 'id="forex_factory_enabled"' not in html:
         html = html.replace(marker, card + marker, 1)
 
-    script = r'''
+    ninja_marker = '<button id="ninjaPresetBtn" class="ninja">Ninja · Aggressive DEMO</button>'
+    pdf_button = '<button id="pdfModeBtn" class="pdfmode">PDF Mode: OFF</button>'
+    if ninja_marker in html and 'id="pdfModeBtn"' not in html:
+        html = html.replace(ninja_marker, ninja_marker + pdf_button, 1)
+
+    if '</style>' in html and 'button.pdfmode' not in html:
+        html = html.replace(
+            '</style>',
+            'button.pdfmode{background:#0f766e;box-shadow:0 0 0 1px #34d399 inset}'
+            'button.pdfmode.on{background:#16a34a;box-shadow:0 0 0 1px #86efac inset}'
+            '</style>',
+            1,
+        )
+
+    ff_script = r'''
 <script>
 (function(){
   const ff=document.getElementById('forex_factory_enabled');
@@ -48,5 +62,45 @@ def inject_forex_factory_control(html: str) -> str:
 </script>
 '''
     if '</body>' in html and '/news/sources' not in html:
-        html = html.replace('</body>', script + '</body>', 1)
+        html = html.replace('</body>', ff_script + '</body>', 1)
+
+    pdf_script = r'''
+<script>
+(function(){
+  const btn=document.getElementById('pdfModeBtn');
+  if(!btn)return;
+  function paint(mode){
+    const on=String(mode||'NORMAL').toUpperCase()==='PDF';
+    btn.textContent=on?'PDF Mode: ON':'PDF Mode: OFF';
+    btn.classList.toggle('on',on);
+    btn.dataset.mode=on?'PDF':'NORMAL';
+  }
+  async function refreshPdfMode(){
+    try{
+      const r=await fetch('/strategy/config');
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||'strategy config failed');
+      paint(d.strategy_mode);
+    }catch(e){btn.textContent='PDF Mode: ERROR';btn.classList.remove('on')}
+  }
+  btn.onclick=async()=>{
+    btn.disabled=true;
+    try{
+      const get=await fetch('/strategy/config');
+      const cfg=await get.json();
+      if(!get.ok)throw new Error(cfg.detail||'load failed');
+      cfg.strategy_mode=String(cfg.strategy_mode||'NORMAL').toUpperCase()==='PDF'?'NORMAL':'PDF';
+      const put=await fetch('/strategy/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+      const saved=await put.json();
+      if(!put.ok)throw new Error(saved.detail||'save failed');
+      paint(saved.strategy_mode);
+    }catch(e){btn.textContent='PDF Mode: ERROR'}
+    finally{btn.disabled=false}
+  };
+  refreshPdfMode();
+})();
+</script>
+'''
+    if '</body>' in html and 'PDF Mode toggle runtime' not in html:
+        html = html.replace('</body>', '<!-- PDF Mode toggle runtime -->' + pdf_script + '</body>', 1)
     return html
