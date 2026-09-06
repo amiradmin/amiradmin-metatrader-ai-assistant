@@ -180,6 +180,22 @@ def _range_context(
     return zone, breakout, lower_touches, upper_touches
 
 
+def _prior_context_is_range(snapshot: MarketSnapshot, settings: PdfModeSettings) -> bool:
+    """Return True only when the market before the latest bar was range-like.
+
+    A rolling high in a healthy trend is not a range breakout. Breakout/fakeout
+    rules from the PDF course are therefore actionable only when the completed
+    bars immediately before the latest candle classify as RANGE.
+    """
+
+    if len(snapshot.bars) < max(settings.trend_lookback + 2, 20):
+        return False
+    prior_snapshot = snapshot.model_copy(update={"bars": snapshot.bars[:-1]})
+    prior_atr = _atr(prior_snapshot)
+    prior_regime, _, _ = _classify_regime(prior_snapshot, settings, prior_atr)
+    return prior_regime == PdfRegime.RANGE
+
+
 def evaluate_pdf_mode(
     snapshot: MarketSnapshot,
     candidate: Decision,
@@ -210,6 +226,7 @@ def evaluate_pdf_mode(
     atr = _atr(snapshot)
     regime, efficiency, net_move_atr = _classify_regime(snapshot, settings, atr)
     zone, breakout, lower_touches, upper_touches = _range_context(snapshot, settings, atr)
+    breakout_context = _prior_context_is_range(snapshot, settings)
 
     allowed = True
     reason: str | None = None
@@ -220,18 +237,18 @@ def evaluate_pdf_mode(
     elif candidate == Decision.BUY and regime in {PdfRegime.STRONG_DOWNTREND, PdfRegime.SPIKE_DOWN}:
         allowed = False
         reason = f"PDF trend priority blocked BUY against {regime.value}."
-    elif breakout == PdfBreakout.VALID_UP and candidate == Decision.SELL:
+    elif breakout_context and breakout == PdfBreakout.VALID_UP and candidate == Decision.SELL:
         allowed = False
-        reason = "PDF valid upside breakout blocked SELL."
-    elif breakout == PdfBreakout.VALID_DOWN and candidate == Decision.BUY:
+        reason = "PDF valid upside range breakout blocked SELL."
+    elif breakout_context and breakout == PdfBreakout.VALID_DOWN and candidate == Decision.BUY:
         allowed = False
-        reason = "PDF valid downside breakout blocked BUY."
-    elif breakout == PdfBreakout.FAKE_UP and candidate == Decision.BUY:
+        reason = "PDF valid downside range breakout blocked BUY."
+    elif breakout_context and breakout == PdfBreakout.FAKE_UP and candidate == Decision.BUY:
         allowed = False
-        reason = "PDF fake upside breakout blocked BUY."
-    elif breakout == PdfBreakout.FAKE_DOWN and candidate == Decision.SELL:
+        reason = "PDF fake upside range breakout blocked BUY."
+    elif breakout_context and breakout == PdfBreakout.FAKE_DOWN and candidate == Decision.SELL:
         allowed = False
-        reason = "PDF fake downside breakout blocked SELL."
+        reason = "PDF fake downside range breakout blocked SELL."
     elif regime == PdfRegime.RANGE and candidate != Decision.WAIT:
         if zone == PdfRangeZone.MIDDLE:
             allowed = False
