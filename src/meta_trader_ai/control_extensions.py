@@ -25,6 +25,11 @@ def inject_forex_factory_control(html: str) -> str:
             '</style>',
             'button.pdfmode{background:#0f766e;box-shadow:0 0 0 1px #34d399 inset}'
             'button.pdfmode.on{background:#16a34a;box-shadow:0 0 0 1px #86efac inset}'
+            '.tip:hover::after,.tip:focus::after{'
+            'width:320px;max-width:min(340px,calc(100vw - 32px));'
+            'direction:rtl;unicode-bidi:plaintext;text-align:start;'
+            'overflow-wrap:anywhere;word-break:normal;line-height:1.85;'
+            'font-family:system-ui,sans-serif}'
             '</style>',
             1,
         )
