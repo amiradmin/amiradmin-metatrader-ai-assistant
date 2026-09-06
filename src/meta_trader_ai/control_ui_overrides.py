@@ -79,6 +79,16 @@ def inject_forex_factory_control(html: str) -> str:
         '<div class="hero-eyebrow">AMIR META TRADER AI</div>',
         1,
     )
+    training_link = '<a class="hero-link" href="/train">Open Training Lab →</a>'
+    if training_link in html and 'href="/live"' not in html:
+        html = html.replace(
+            training_link,
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">'
+            '<a class="hero-link" href="/live">Open Live Dashboard →</a>'
+            + training_link
+            + '</div>',
+            1,
+        )
     if '</body>' in html and 'single-day historical report UX' not in html:
         html = html.replace('</body>', _DAILY_REPORT_SCRIPT + '</body>', 1)
     return html
