@@ -69,6 +69,30 @@ def range_snapshot() -> MarketSnapshot:
     )
 
 
+def permissive_config(mode: str) -> StrategyConfig:
+    config = StrategyConfig(strategy_mode=mode)
+    for name in (
+        "dynamic_levels",
+        "static_levels",
+        "fibonacci",
+        "patterns",
+        "pivots",
+        "divergence",
+    ):
+        factor = getattr(config, name)
+        factor.min_score = 0
+        factor.required = False
+    config.decision.min_pass_count = 1
+    config.decision.min_total_score = 0
+    config.decision.min_side_edge = 0
+    config.safety.max_spread_points = 60
+    config.safety.block_high_news = True
+    config.safety.block_unknown_news = False
+    config.safety.demo_only = True
+    config.safety.regime_filter_enabled = False
+    return config
+
+
 def test_pdf_mode_blocks_countertrend_direction() -> None:
     evaluation = evaluate_pdf_mode(trend_snapshot(up=True), Decision.SELL)
 
@@ -106,6 +130,44 @@ def test_decision_engine_reports_normal_and_pdf_modes() -> None:
     assert pdf.pdf_status in {"CONFIRM", "BLOCK", "OBSERVE"}
     assert pdf.pdf_regime != "UNAVAILABLE"
     assert pdf.signal_id.endswith("_PDF")
+
+
+def test_normal_mode_can_emit_buy_and_sell_as_trade_allowed() -> None:
+    buy = build_decision(trend_snapshot(up=True), permissive_config("NORMAL"))
+    sell = build_decision(trend_snapshot(up=False), permissive_config("NORMAL"))
+
+    assert buy.decision == Decision.BUY
+    assert buy.trade_allowed is True
+    assert buy.pdf_status == "DISABLED"
+    assert sell.decision == Decision.SELL
+    assert sell.trade_allowed is True
+    assert sell.pdf_status == "DISABLED"
+
+
+def test_pdf_mode_can_emit_with_trend_buy_and_sell_as_trade_allowed() -> None:
+    buy = build_decision(trend_snapshot(up=True), permissive_config("PDF"))
+    sell = build_decision(trend_snapshot(up=False), permissive_config("PDF"))
+
+    assert buy.decision == Decision.BUY
+    assert buy.trade_allowed is True
+    assert buy.pdf_status == "CONFIRM"
+    assert buy.pdf_regime == "STRONG_UPTREND"
+    assert sell.decision == Decision.SELL
+    assert sell.trade_allowed is True
+    assert sell.pdf_status == "CONFIRM"
+    assert sell.pdf_regime == "STRONG_DOWNTREND"
+
+
+def test_strategy_modes_use_distinct_signal_ids_for_same_bar() -> None:
+    normal = build_decision(trend_snapshot(up=True), permissive_config("NORMAL"))
+    pdf = build_decision(trend_snapshot(up=True), permissive_config("PDF"))
+
+    assert normal.signal_id != pdf.signal_id
+    assert normal.signal_id.endswith("_NORMAL")
+    assert pdf.signal_id.endswith("_PDF")
+    assert normal.risk_percent == pdf.risk_percent
+    assert normal.reward_risk_ratio == pdf.reward_risk_ratio
+    assert normal.max_open_trades == pdf.max_open_trades
 
 
 def test_control_panel_injection_puts_pdf_toggle_beside_ninja() -> None:
