@@ -1,8 +1,12 @@
+from meta_trader_ai import api as api_module
+from meta_trader_ai.config_store import StrategyConfigStore
 from meta_trader_ai.control_extensions import inject_forex_factory_control
 from meta_trader_ai.control_page import control_page_html
 from meta_trader_ai.decision_engine import build_decision
+from meta_trader_ai.journal import DecisionJournal
 from meta_trader_ai.models import Bar, Decision, MarketSnapshot, StrategyConfig
 from meta_trader_ai.pdf_mode import PdfRegime, PdfRangeZone, evaluate_pdf_mode
+from meta_trader_ai.performance import PerformanceStore
 
 
 def trend_snapshot(up: bool = True) -> MarketSnapshot:
@@ -168,6 +172,21 @@ def test_strategy_modes_use_distinct_signal_ids_for_same_bar() -> None:
     assert normal.risk_percent == pdf.risk_percent
     assert normal.reward_risk_ratio == pdf.reward_risk_ratio
     assert normal.max_open_trades == pdf.max_open_trades
+
+
+def test_recommended_profile_preserves_pdf_strategy_mode(tmp_path, monkeypatch) -> None:
+    config_store = StrategyConfigStore(tmp_path / "strategy.json")
+    config_store.save(StrategyConfig(strategy_mode="PDF"))
+    monkeypatch.setattr(api_module, "config_store", config_store)
+    monkeypatch.setattr(api_module, "performance_store", PerformanceStore(tmp_path / "outcomes.jsonl"))
+    monkeypatch.setattr(api_module, "decision_journal", DecisionJournal(tmp_path / "decisions.jsonl"))
+
+    payload = api_module._recommended_payload()
+    saved = api_module.apply_recommended_strategy()
+
+    assert payload["config"]["strategy_mode"] == "PDF"
+    assert saved.strategy_mode == "PDF"
+    assert config_store.load().strategy_mode == "PDF"
 
 
 def test_control_panel_injection_puts_pdf_toggle_beside_ninja() -> None:
